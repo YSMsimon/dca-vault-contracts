@@ -1,0 +1,84 @@
+{
+  "_comment": "Every address below was verified against Base mainnet on 2026-09-21. Do not edit by hand without re-verifying — a wrong address here is a drained plan.",
+  "chainId": 8453,
+  "verifiedAt": "2026-09-21",
+  "_deployment": "null until the vault is on Base mainnet. While it is null the web app builds in PRE-LAUNCH mode: no wallet button, no deposits, and the app pages say they are not open yet. The mainnet deploy fills it with { vault, oracle, yieldAdapter, swapAdapter, keeper, deployBlock, routeIds: { NVDAc: 1, ... }, verified }, and that one change is what opens the site.",
+  "deployment": null,
+  "core": {
+    "USDC":        { "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 },
+    "MorphoBlue":  { "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb" },
+    "AaveV3Pool":  { "address": "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5" },
+    "AaveV3aUSDC": { "address": "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB", "decimals": 6, "_note": "Aave's aUSDC. REBASES: balance is scaledBalanceOf * liquidityIndex, so the vault ledgers the scaled unit. Confirmed live by ForkAdapters.t.sol, which supplies and withdraws real USDC through the pool above." }
+  },
+  "yieldVault": {
+    "_choice": "Gauntlet USDC Prime — largest Base USDC vault, and verified to hold ZERO allocation to B20 stock-collateral markets. Steakhouse High Yield USDC v1.1 pays 5.30% but holds 3.2% in AAPLc/GOOGLc/METAc/NVDAc/SPCXc collateral markets: correlated with exactly the assets this protocol buys, so its extra yield is compensation for the risk we must not take.",
+    "name": "Gauntlet USDC Prime",
+    "address": "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61",
+    "netApy": 0.0442,
+    "tvlUsd": 415905989,
+    "timelockHours": 168,
+    "b20CollateralExposure": 0.0
+  },
+  "routes": [
+    {
+      "ticker": "NVDAc",
+      "token":  "0xb20000000000000000000078ee7ce2fE4908108C",
+      "decimals": 8,
+      "pool":   "0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9",
+      "dexKind": "AERODROME_SLIPSTREAM",
+      "quote": "USDC",
+      "tickSpacing": 10,
+      "observationCardinality": 2048,
+      "poolLiquidityUsd": 2294939,
+      "feed": "0x04689a41629776563E6822F76f2e57D148d28513",
+      "feedDecimals": 8
+    },
+    {
+      "ticker": "GOOGLc",
+      "token":  "0xb2000000000000000000002D0BA3164cc74f58B7",
+      "decimals": 8,
+      "pool":   "0xB1987CAD1682841b4b641d50E520777eC5Ab5542",
+      "dexKind": "AERODROME_SLIPSTREAM",
+      "quote": "USDC",
+      "tickSpacing": 10,
+      "observationCardinality": 2048,
+      "poolLiquidityUsd": 1344297,
+      "feed": "0x5bF49E0ffA937CE2FfF033c739aD7C634c4D34F2",
+      "feedDecimals": 8
+    },
+    {
+      "ticker": "AAPLc",
+      "token":  "0xb200000000000000000000C2e324d24d7eEcd1fb",
+      "decimals": 8,
+      "pool":   "0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0",
+      "dexKind": "AERODROME_SLIPSTREAM",
+      "quote": "USDC",
+      "tickSpacing": 10,
+      "observationCardinality": 2048,
+      "poolLiquidityUsd": 1562201,
+      "feed": "0x787f13dEa48Db0897CbCDD985de77809D837F988",
+      "feedDecimals": 8
+    },
+    {
+      "ticker": "METAc",
+      "token":  "0xb2000000000000000000008bC8786B856E61707C",
+      "decimals": 8,
+      "pool":   "0xEAF57753BC382E0324a1D43F72E7027705a2273E",
+      "dexKind": "AERODROME_SLIPSTREAM",
+      "quote": "USDC",
+      "tickSpacing": 10,
+      "observationCardinality": 2048,
+      "poolLiquidityUsd": 2099563,
+      "feed": "0x6526aE6797A76123638b863AeE4dD27Ba4E4b27D",
+      "feedDecimals": 8
+    }
+  ],
+  "feedProperties": {
+    "_comment": "All Coinbase B20 equity feeds share these. The 24/5 window is why exitPlan must never depend on feed freshness.",
+    "decimals": 8,
+    "heartbeatSeconds": 86400,
+    "deviationThresholdPct": 0.5,
+    "marketHours": "24/5 - frozen Friday close to Monday open"
+  },
+  "notIssuedOrUnpooled": ["AMZN", "COIN", "CRCL", "INTC", "MSFT", "MSTR", "SNDK", "SPCX", "TSLA"]
+}

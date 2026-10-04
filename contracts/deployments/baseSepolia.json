@@ -1,0 +1,44 @@
+{
+  "chainId": 84532,
+  "vault": "0x5713Ff26225F6127FF98747087607D483d0DFE68",
+  "usdc": "0x0122C1B9bf7195f9A832316011dfd683d7a90EF5",
+  "oracle": "0x60fd8F9672529E91cD4265cae1Ff5a49520B8529",
+  "yieldAdapter": "0x13a04d7Eda2a2039e409EAeA82b77ee49D4b6764",
+  "swapAdapter": "0x20da69A44F96363D769c0066e4A564b4e2389e38",
+  "keeper": "0x491d06A4c804420940A48A4E3c883eB241d13ef7",
+  "deployBlock": 47519191,
+  "faucet": true,
+  "demo": true,
+  "usdcDecimals": 6,
+  "stockDecimals": 8,
+  "routes": [
+    {
+      "routeId": 1,
+      "symbol": "NVDAc",
+      "name": "Demo NVIDIA",
+      "token": "0x9bF3F751eF41426dCE35C58549C02EF4A329D66C",
+      "price8": "22756000000"
+    },
+    {
+      "routeId": 2,
+      "symbol": "GOOGLc",
+      "name": "Demo Alphabet",
+      "token": "0x06E3de5F5d59C401Cd93378E402B3d6b7a5212Bf",
+      "price8": "35510000000"
+    },
+    {
+      "routeId": 3,
+      "symbol": "AAPLc",
+      "name": "Demo Apple",
+      "token": "0xED4064b1F18Ff951eAaabeA1FadEfb0Eef4126E9",
+      "price8": "33934000000"
+    },
+    {
+      "routeId": 4,
+      "symbol": "METAc",
+      "name": "Demo Meta",
+      "token": "0xB58cceBf978C76De1c1Bde2415288242ecCAF657",
+      "price8": "74027000000"
+    }
+  ]
+}

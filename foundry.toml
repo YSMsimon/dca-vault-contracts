@@ -1,0 +1,45 @@
+[profile.default]
+# ONE foundry project root, and it is the repo root: run every forge command
+# from this directory. Sources, build output, cache and broadcast records all
+# live under contracts/.
+src = "contracts/src"
+test = "contracts/test"
+script = "contracts/script"
+out = "contracts/out"
+libs = ["contracts/lib"]
+broadcast = "contracts/broadcast"
+cache_path = "contracts/cache"
+solc = "0.8.26"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+
+# Declaring fs_permissions at all REPLACES the default allowlist, so every path
+# a test or script touches has to be named. The deploy scripts write the
+# addresses they just created under contracts/deployments; out/ is read by
+# tests, which deploy from an artifact.
+fs_permissions = [
+    { access = "read-write", path = "./contracts/deployments" },
+    { access = "read", path = "./contracts/out" },
+    { access = "read", path = "./packages/config" },
+]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
+[rpc_endpoints]
+base = "${BASE_RPC_URL}"
+
+[fmt]
+line_length = 100
+tab_width = 4
+
+# `forge build` would otherwise print forge-lint's notes on every build (over a
+# hundred, most of them in tests). Run them on purpose with `forge lint`.
+[lint]
+lint_on_build = false

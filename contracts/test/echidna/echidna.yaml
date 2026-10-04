@@ -1,0 +1,11 @@
+# Echidna property run for contracts/test/echidna/EchidnaDca.sol.
+# From the repo root (the one Foundry project root):
+#   echidna . --contract EchidnaDca --config contracts/test/echidna/echidna.yaml
+testMode: property
+testLimit: 200000
+seqLen: 150
+shrinkLimit: 3000
+maxTimeDelay: 8000000
+maxBlockDelay: 60000
+corpusDir: contracts/test/echidna/corpus
+cryticArgs: ["--foundry-compile-all"]

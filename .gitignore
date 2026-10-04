@@ -1,0 +1,12 @@
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/out-halmos/
+contracts/cache-halmos/
+contracts/test/echidna/corpus/
+contracts/deployments/invariant-stats/
+crytic-export/
+.env
+.env.*
+node_modules/
+.DS_Store
