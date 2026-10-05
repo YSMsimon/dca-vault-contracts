@@ -177,8 +177,11 @@ contract Adv2Test is Test {
     function testFuzz_LossIsProportional(uint256 lossWad, uint256 accWad, uint8 order, uint256 dA, uint256 dB)
         public
     {
-        dA = bound(dA, 4e6, 300_000e6);
-        dB = bound(dB, 3e6, 300_000e6);
+        // From 5 and 4 USDC, not 4 and 3: split by rounding the installment
+        // up, the last period is up to 3 wei short of the others, and it has
+        // to be at least MIN_INSTALLMENT too.
+        dA = bound(dA, 5e6, 300_000e6);
+        dB = bound(dB, 4e6, 300_000e6);
         accWad = bound(accWad, 1e18, 1.2e18);
         lossWad = bound(lossWad, 0.01e18, 1e18);
         oracle.setFresh(false);
@@ -239,7 +242,9 @@ contract Adv2Test is Test {
         fee = uint16(bound(fee, 0, 1000));
         accWad = bound(accWad, 1e18, 1.5e18);
         lossWad = bound(lossWad, 0.3e18, 1e18);
-        dep = bound(dep, 10e6, 500_000e6);
+        // From 11 USDC, not 10: the last of the ten periods is up to 9 wei
+        // short of the others, and it has to be at least MIN_INSTALLMENT too.
+        dep = bound(dep, 11e6, 500_000e6);
         vault.setFee(fee);
         oracle.setFresh(false);
         vm.prank(alice);
@@ -265,11 +270,49 @@ contract Adv2Test is Test {
     }
 
     // =========================================================== params
-    function testFuzz_CreateParamsEdges(uint256 dep, uint256 inst, uint64 iv) public {
-        dep = bound(dep, 0, 1_000_000e6);
-        inst = bound(inst, 0, 10_000_000e6);
+    /// The vault's whole admission rule for a plan, against a model of it:
+    /// what the model accepts is created and runs to its end in at most 120
+    /// buys, and what it does not is refused.
+    ///
+    /// Round 6b. This used to draw the deposit, the installment and the
+    /// interval freely. A free uint64 interval is almost never one the vault
+    /// accepts, so nearly every run was refused for its interval and the
+    /// split never decided anything: the test passed with the last-period
+    /// rule (round 6, R5-5) deleted, and with either of its off-by-ones. Now
+    /// seven runs in eight take an interval the vault accepts, and seven in
+    /// eight BUILD the deposit as k installments plus a tail, with the tail
+    /// on each side of every edge the rule has.
+    function testFuzz_CreateParamsEdges(uint256 dep, uint256 inst, uint64 iv, uint256 tail, uint8 mode)
+        public
+    {
+        // One run in eight keeps the free interval: too short and too long
+        // are still refused.
+        if (mode % 8 != 0) iv = uint64(bound(iv, 1 days, 366 days));
+        uint256 shape = (mode >> 3) % 8;
+        if (shape == 0) {
+            // Free: any deposit and any installment, as before.
+            dep = bound(dep, 0, 1_000_000e6);
+            inst = bound(inst, 0, 10_000_000e6);
+        } else {
+            inst = bound(inst, 1e6, 3_000e6);
+            // Whole periods: a few, or right at the 120-period ceiling.
+            uint256 k = dep % 8 < 5 ? 1 + (dep >> 8) % 6 : 118 + (dep >> 8) % 4;
+            if (shape == 1) tail = 0; // the deposit divides
+            else if (shape == 2) tail = 1; // the smallest dust there is
+            else if (shape == 3) tail = 1e6 - 1; // one wei under the minimum
+            else if (shape == 4) tail = 1e6; // exactly the minimum: the shortest tail admitted
+            else if (shape == 5) tail = 1e6 + 1;
+            else if (shape == 6) tail = bound(tail, 1, 1e6 - 1); // any dust
+            else tail = bound(tail, 1e6, 3_000e6); // any real last period
+            // A tail is a remainder, so it is under the installment.
+            if (tail >= inst) tail = inst - 1;
+            dep = k * inst + tail;
+            assertEq(dep % inst, tail);
+        }
         bool okExpected = inst >= 1e6 && inst <= dep && (dep + inst - 1) / inst <= 120 && iv >= 1 days
             && iv <= 366 days;
+        // The last period is held to the minimum too (round 6, R5-5).
+        if (okExpected && dep % inst != 0 && dep % inst < 1e6) okExpected = false;
         oracle.setFresh(false);
         vm.prank(alice);
         try vault.createPlan(1, dep, inst, iv) returns (uint256 id) {

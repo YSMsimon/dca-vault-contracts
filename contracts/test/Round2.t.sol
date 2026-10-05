@@ -286,7 +286,7 @@ contract Round2Test is Test {
         vm.prank(alice);
         vault.createPlan(1, 10_000e6, 1_000e6, 30 days);
         MockStock t2 = new MockStock("T2", "T2");
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f1 = new FakeFeed();
         FakeFeed f2 = new FakeFeed();
         cl.setFeed(address(t2), address(f1));
@@ -316,7 +316,7 @@ contract Round2Test is Test {
     /// dormant feed has expired, the loosening is queued rather than applied,
     /// and the same sandwich either reverts or costs at most maxSlippageBps.
     function test_D2_ADormantFeedQueueCannotBeSprungWithASandwich() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         CpammSwap pool = new CpammSwap(usdc, stock, 5_000_000e6, 5_000_000e6 * 1e10 / PX);
         uint256 real = pool.poolPrice(address(0), address(0));
         FakeFeed good = new FakeFeed();
@@ -367,7 +367,7 @@ contract Round2Test is Test {
     /// Before: `queueFeed` accepted a token with no feed at all — a dormant
     /// entry that meant nothing until a later `setFeed`. Now it is refused.
     function test_D2_QueueFeedNeedsAListedToken() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f = new FakeFeed();
         vm.expectRevert(ChainlinkOracle.NoFeed.selector);
         cl.queueFeed(address(stock), address(f));
@@ -473,7 +473,7 @@ contract Round2Test is Test {
     /// deprecated feed blocked deposits too. Now it reads as not fresh: the
     /// deposit goes through with no first buy, and executions wait.
     function test_D4_ARevertingFeedDoesNotBlockDeposits() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f = new FakeFeed();
         f.set(int256(PX), block.timestamp, true);
         cl.setFeed(address(stock), address(f));
@@ -612,7 +612,7 @@ contract Round2Test is Test {
     /// token's feed behind its own delay, the route record still names the
     /// old one — and the vault, which never reads it, prices off the new.
     function test_D6_RouteFeedIsTheFeedAtAdmission() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f1 = new FakeFeed();
         FakeFeed f2 = new FakeFeed();
         f1.set(int256(PX), block.timestamp, true);
@@ -646,23 +646,40 @@ contract Round2Test is Test {
     }
 
     // ================================================================= D7
-    /// Documented, not changed (Adv2.test_N_EarlyShortfallEndFromRounding): a
-    /// plan whose last slice is a few wei above one installment, at a non-par
-    /// share price, redeems everything one period early. The loss is wei, it
-    /// is reported as PlanShortfall, and the plan closes cleanly.
-    function test_D7_ALastSliceCanEndOnePeriodEarlyByWei() public {
+    /// Round 2 documented this and left it (Adv2.test_N_EarlyShortfallEndFromRounding):
+    /// a plan whose remaining principal was a few wei above one installment,
+    /// at a non-par share price, redeemed everything one period early and
+    /// reported the wei as a shortfall. Round 6 (R5-5) refuses that plan at
+    /// the door: the last period is at least MIN_INSTALLMENT too. So an early
+    /// end now takes a real loss of at least that much, never rounding, and
+    /// the same shape with the shortest tail the vault admits runs every period.
+    function test_D7_RoundingCanNoLongerEndAPlanOnePeriodEarly() public {
         y.accrueTo(1.07e18);
         vm.prank(alice);
-        uint256 id = vault.createPlan(1, 2000e6 + 1, 1000e6, 30 days);
+        vm.expectRevert(DcaVault.BadParams.selector);
+        vault.createPlan(1, 2000e6 + 1, 1000e6, 30 days);
+
+        vm.prank(alice);
+        uint256 id = vault.createPlan(1, 2001e6, 1000e6, 30 days);
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(alice);
+        vault.executeDCA(id);
+        (uint256 rem,,, uint32 done, bool act) = _p(vault, id);
+        assertTrue(act, "closed one period early");
+        assertEq(done, 2);
+        assertEq(rem, 1e6, "the last period is not the tail");
+
         vm.warp(block.timestamp + 30 days);
         vm.recordLogs();
         vm.prank(alice);
         vault.executeDCA(id);
-        (uint256 rem, uint256 sh,, uint32 done, bool act) = _p(vault, id);
+        uint256 sh;
+        (rem, sh,, done, act) = _p(vault, id);
         assertFalse(act);
         assertEq(rem, 0);
         assertEq(sh, 0);
-        assertEq(done, 2, "three periods by count, closed after two");
+        assertEq(done, 3, "three periods by count, and three were bought");
+        // What rounding costs is still reported, and is still wei.
         Vm.Log[] memory logs = vm.getRecordedLogs();
         uint256 shortfall;
         for (uint256 i; i < logs.length; ++i) {

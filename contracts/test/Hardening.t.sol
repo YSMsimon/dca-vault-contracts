@@ -143,7 +143,7 @@ contract HardeningTest is Test {
     /// adapter handed the next installment to it. Now a route's token and pool
     /// are fixed for life and the setup window is shut by the first plan.
     function test_C1_LiveRouteCannotBeRepointedAtAFakePool() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         AerodromeSwapAdapter aero = new AerodromeSwapAdapter(IERC20(address(usdc)), predicted);
         DcaVault v3 = new DcaVault(IERC20(address(usdc)), y, aero, cl, 10_000_000e6);
@@ -335,7 +335,7 @@ contract HardeningTest is Test {
     /// The oracle had the same hole: a feed could be swapped under a live
     /// route instantly, by an admin that could never be handed over.
     function test_C1_OracleFeedChangesAreQueuedAndAdminIsTwoStep() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f1 = new FakeFeed();
         FakeFeed f2 = new FakeFeed();
         address tok = address(0x70C);
@@ -649,7 +649,7 @@ contract HardeningTest is Test {
     }
 
     function test_C5_OracleRejectsBrokenRounds() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f = new FakeFeed();
         address tok = address(0x70C);
         cl.setFeed(tok, address(f));
@@ -679,7 +679,7 @@ contract HardeningTest is Test {
     }
 
     function test_C5_SetFeedChecksDecimals() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f = new FakeFeed();
         f.setDecimals(18);
         vm.expectRevert(abi.encodeWithSelector(ChainlinkOracle.BadDecimals.selector, uint8(18)));

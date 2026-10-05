@@ -122,7 +122,7 @@ contract AdvHandler is Test {
         t2 = new MockStock("T2", "T2");
         y = new MockYieldAdapter(usdc);
         pool = new CpammSwap(usdc, stock, 20_000_000e6, 20_000_000e6 * 1e10 / PX);
-        cl = new ChainlinkOracle();
+        cl = new ChainlinkOracle(address(0), false);
         for (uint256 i; i < 3; ++i) {
             feeds[i] = new FakeFeed();
             feeds[i].set(int256(pool.poolPrice(address(0), address(0))), block.timestamp, true);

@@ -67,6 +67,10 @@ contract Handler is Test {
         uint256 lo = (dep + vault.MAX_PERIODS() - 1) / vault.MAX_PERIODS();
         if (lo < vault.MIN_INSTALLMENT()) lo = vault.MIN_INSTALLMENT();
         inst = bound(inst, lo, dep);
+        // ...the last, short period included: a deposit that leaves a tail
+        // under MIN_INSTALLMENT is refused, so drop the tail.
+        uint256 tail = dep % inst;
+        if (tail != 0 && tail < vault.MIN_INSTALLMENT()) dep -= tail;
         address a = _actor(seed);
         usdc.mint(a, dep);
         vm.startPrank(a);

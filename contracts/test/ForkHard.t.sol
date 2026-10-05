@@ -51,7 +51,7 @@ contract ForkHardTest is Test {
         vm.createSelectFork(rpc, FORK_BLOCK);
         _feedPrints();
 
-        oracle = new ChainlinkOracle();
+        oracle = new ChainlinkOracle(address(0), false);
         stock = new MockStock("Fork NVDAc", "NVDAc");
         oracle.setFeed(address(stock), FEED);
         poolOracle = new MockPriceOracle();
@@ -139,7 +139,9 @@ contract ForkHardTest is Test {
         vAave.createPlan(1, 100_000e6, 1_000e6, 30 days);
         for (uint256 i; i < 20; ++i) {
             vm.prank(alice);
-            uint256 id = vAave.createPlan(1, 12_345_678 + i * 1_000_003, 1_000_000, 30 days);
+            // Odd amounts, with the odd part in the last period, which has
+            // to be at least 1 USDC itself: a tail of 1.345678 USDC and up.
+            uint256 id = vAave.createPlan(1, 13_345_678 + i * 2_000_003, 2_000_000, 30 days);
             vm.warp(block.timestamp + 3 days);
             vm.roll(block.number + 3 * 43_200);
             _feedPrints();

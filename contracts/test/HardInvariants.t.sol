@@ -127,6 +127,11 @@ contract HardHandler is Test {
     uint256 public createOk;
     uint256 public calmTries; // executeCalm calls that reached an active plan
     uint256 public calmOk;
+    // Round 6b: plans built with the SHORTEST last period the vault admits
+    // (see createPlan), and how many of those last periods were bought.
+    uint256 public shortTails;
+    uint256 public shortTailsBought;
+    mapping(uint256 => bool) public isShortTail;
 
     constructor(
         DcaVault v,
@@ -269,8 +274,25 @@ contract HardHandler is Test {
         else if (mode == 2) dep = bound(dep, cap / 2, cap + 10);
         else dep = bound(dep, 1e6, 100_000e6);
         months = bound(months, 3, 60);
-        uint256 inst = dep / months;
-        if (inst == 0) inst = dep;
+        // Rounded UP, so the last period is the short one, by less than
+        // `months` wei. Rounded down, the remainder was an extra period of a
+        // few wei, which the vault refuses since round 6 (R5-5): this handler
+        // then created almost nothing, and every invariant below passed on
+        // an empty vault.
+        uint256 inst = (dep + months - 1) / months;
+        // Round 6b (review finding 8). Rounding up leaves every last period
+        // within `months` wei of a full one, so the edge R5-5 created, a
+        // last period of barely the minimum, was in none of these runs.
+        // One ordinary deposit in four is now built the other way round:
+        // one to three whole periods (few, so that a run of 64 calls gets
+        // as far as the last one), then a tail of MIN_INSTALLMENT plus 0 to
+        // 7 wei. (seed 3, which HandlerSanity uses, is not one of them.)
+        bool shortTail = mode >= 3 && (seed / 5) % 4 == 3;
+        if (shortTail) {
+            months = 1 + months % 3;
+            inst = bound(dep, 2e6, 2_000e6);
+            dep = months * inst + vault.MIN_INSTALLMENT() + (seed / 20) % 8;
+        }
         uint64 iv = uint64(bound(ivSeed, 1 days, 90 days));
         usdc.mint(a, dep);
         uint256 tpBefore = vault.totalPrincipal();
@@ -281,6 +303,10 @@ contract HardHandler is Test {
             planIds.push(id);
             createOk++;
             deposited[id] = dep;
+            if (shortTail) {
+                shortTails++;
+                isShortTail[id] = true;
+            }
             // 1 normally; 0 when the feed was frozen and the first buy waits.
             (,,,,,,, uint32 done,) = vault.plans(id);
             execCount[id] = done;
@@ -358,6 +384,9 @@ contract HardHandler is Test {
             execCount[e.id]++;
             execOk++;
             ledgerOps++;
+            // The short last period itself: what was left was under one
+            // installment, and this buy spent it.
+            if (isShortTail[e.id] && e.rem < e.inst) shortTailsBought++;
             _fill(e);
         } catch (bytes memory err) {
             execWhy[err.length >= 4 ? bytes4(err) : bytes4(0)]++;
@@ -459,7 +488,8 @@ contract HardHandler is Test {
 
     function createCalm(uint256 seed, uint256 dep, uint256 months, uint256 ivSeed) public {
         _calm();
-        // mode 3: an ordinary deposit, 1..100k USDC
+        // mode 3: an ordinary deposit, 1..100k USDC; one in four of them
+        // with the short tail (the seed's next digit picks it).
         createPlan(seed / 10 * 5 + 3, dep, months, ivSeed);
     }
 
@@ -716,7 +746,10 @@ abstract contract HardBase is Test {
             string.concat(
                 vm.toString(h.execOk()), " ", vm.toString(h.execCalls()), " ",
                 vm.toString(h.execHealthy()), " ", vm.toString(h.createOk()), " ",
-                vm.toString(h.calmTries()), " ", vm.toString(h.calmOk()), " |", _why()
+                vm.toString(h.calmTries()), " ", vm.toString(h.calmOk()), " |", _why(),
+                // Appended in round 6b, after everything that was there:
+                // short-tail plans created, and short last periods bought.
+                " | ", vm.toString(h.shortTails()), " ", vm.toString(h.shortTailsBought())
             )
         );
         assertEq(h.calmOk(), h.calmTries(), "F6: a calm execute reverted");
@@ -897,5 +930,47 @@ contract HandlerSanity is HardBase {
         assertEq(done, 2);
         assertApproxEqAbs(h.maxFillLossBps(), 60, 1);
         assertEq(h.unexpected(), 0);
+    }
+
+    /// Round 6b (review finding 8). The handler's short-tail mode builds
+    /// what it says: whole periods and then the shortest last period the
+    /// vault admits, exactly MIN_INSTALLMENT or a few wei over, and the
+    /// handler's own executes carry such a plan through that last period.
+    function test_handlerBuildsAShortTail() public {
+        // seed % 5 == 3 and (seed / 5) % 4 == 3; (seed / 20) % 8 is the wei.
+        _shortTail(18, 0); // a tail of exactly 1 USDC
+        _shortTail(118, 5); // and of 1 USDC and 5 wei
+        assertEq(h.shortTails(), 2);
+        assertEq(h.shortTailsBought(), 2);
+        assertEq(h.unexpected(), 0);
+        assertEq(h.panics(), 0);
+
+        // The seed the other sanity test uses still takes the ceiling split.
+        h.createPlan(3, 50_000e6, 10, 30 days);
+        assertEq(h.shortTails(), 2);
+        (,, uint256 inst,,,,,,) = vault.plans(3);
+        assertEq(inst, 5_000e6);
+    }
+
+    function _shortTail(uint256 seed, uint256 smallWei) internal {
+        uint256 id = vault.nextPlanId();
+        h.createPlan(seed, 50_000e6, 10, 30 days);
+        assertTrue(h.isShortTail(id), "the seed did not select the short tail");
+        (,, uint256 inst, uint256 rem,,,, uint32 done, bool active) = vault.plans(id);
+        uint256 dep = h.deposited(id);
+        // `months` 10 is two whole periods in this mode.
+        assertEq(dep, 2 * inst + 1e6 + smallWei, "dep = k * inst + MIN_INSTALLMENT + small");
+        assertEq(dep % inst, 1e6 + smallWei);
+        assertEq(rem, dep - inst);
+        assertEq(done, 1);
+        // The second whole period, then the short one.
+        for (uint256 i; i < 2; ++i) {
+            assertTrue(active, "the plan ended early");
+            h.executeOwner(1);
+            (,,, rem,,,, done, active) = vault.plans(id);
+        }
+        assertEq(done, 3);
+        assertEq(rem, 0);
+        assertFalse(active, "the short last period was not bought");
     }
 }

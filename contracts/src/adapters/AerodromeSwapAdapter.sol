@@ -6,7 +6,7 @@ import {IERC20} from "../interfaces/IERC20.sol";
 import {SafeTransfer} from "../libs/SafeTransfer.sol";
 
 /// @dev Aerodrome Slipstream is a Uniswap-v3 fork: same swap signature, same
-///      callback name, same slot0 layout.
+///      callback name, same slot0 layout, same price oracle (`observe`).
 interface ICLPool {
     function swap(
         address recipient,
@@ -26,6 +26,10 @@ interface ICLPool {
             uint16 observationCardinalityNext,
             bool unlocked
         );
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory);
     function token0() external view returns (address);
     function token1() external view returns (address);
 }
@@ -43,6 +47,15 @@ contract AerodromeSwapAdapter is ISwapAdapter {
     using SafeTransfer for address;
     uint160 internal constant MIN_SQRT = 4295128740;
     uint160 internal constant MAX_SQRT = 1461446703485210103287273052203988822378723970341;
+    /// Seconds of the pool's own price history the push check looks back
+    /// over (`_assertNotPushed`).
+    uint32 public constant TWAP_WINDOW = 300;
+    /// That history is read as TWAP_WINDOW / TWAP_STEP consecutive averages
+    /// of this many seconds each: five one-minute averages.
+    uint32 public constant TWAP_STEP = 60;
+    /// How far the pool's spot tick may sit from ANY of those averages. A
+    /// tick is a factor of 1.0001, one basis point, so this is about 1%.
+    int24 public constant MAX_TWAP_DRIFT = 100;
 
     IERC20 public immutable usdc;
     address public immutable vault;
@@ -53,6 +66,13 @@ contract AerodromeSwapAdapter is ISwapAdapter {
     error WrongPool();
     error AmountTooLarge();
     error WrongInput(uint256 paid, uint256 expected);
+    /// The pool's spot is more than MAX_TWAP_DRIFT ticks from one of its
+    /// own TWAP_STEP averages over the last TWAP_WINDOW seconds. `twapTick`
+    /// is the average furthest from the spot.
+    error PoolPushed(int24 spotTick, int24 twapTick);
+    /// The pool has no observation TWAP_WINDOW old, answered the wrong
+    /// number of cumulatives, or answered an average that is not a tick.
+    error NoPriceHistory();
 
     // solc 0.8.26 has no `transient` for value types. Both are set just before
     // the pool is called and cleared INSIDE the callback, before it pays: the
@@ -84,6 +104,8 @@ contract AerodromeSwapAdapter is ISwapAdapter {
         address(usdc).safeTransferFrom(msg.sender, address(this), amountIn);
 
         bool zeroForOne = _assertPair(pool, tokenOut);
+        // Before the swap: after it, the spot is this trade's own doing.
+        _assertNotPushed(pool);
         uint256 before = IERC20(tokenOut).balanceOf(recipient);
         _activePool = pool;
         _expectedIn = amountIn;
@@ -117,6 +139,134 @@ contract AerodromeSwapAdapter is ISwapAdapter {
         if (t0 == address(usdc) && t1 == tokenOut) return true;
         if (t1 == address(usdc) && t0 == tokenOut) return false;
         revert WrongPool();
+    }
+
+    /// @dev THE PUSH CHECK. The vault's breaker compares the pool's SPOT
+    ///      price with the feed, and spot is whatever the last swap left
+    ///      behind: a caller can move it inside the band, execute a buy at
+    ///      the moved price and unwind, all in one transaction. So the spot
+    ///      must also agree with the pool's OWN recent history: with each of
+    ///      its five TWAP_STEP (60 s) averages over the last TWAP_WINDOW
+    ///      (300 s), to within MAX_TWAP_DRIFT ticks.
+    ///
+    ///      Why a push of more than MAX_TWAP_DRIFT in this transaction or
+    ///      block cannot pass. A v3 pool
+    ///      writes at most one observation per block, before the first swap
+    ///      of that block that moves the tick, and from the tick it had
+    ///      BEFORE that swap. `observe(.., 0)` answers with that observation,
+    ///      or, when nothing has moved the tick in this block, extrapolates
+    ///      from the last one. Either way a swap in this transaction or this
+    ///      block is in none of the averages, so the push shows up whole as
+    ///      drift.
+    ///
+    ///      WHAT IT DOES NOT STOP. Each average is a mean of TICKS, so what
+    ///      moves it is tick-seconds, not time: a pool left 15,000 ticks off
+    ///      for one 2-second block moves a 60 s average 500 ticks, the same
+    ///      as a pool held 500 ticks off for the whole minute. A single
+    ///      300 s average could be moved the same 500 ticks by ONE block at
+    ///      75,000 ticks. Five separate averages can still be moved, in two
+    ///      ways:
+    ///        - fast: an off-market block inside EACH of the five minutes,
+    ///          the first of them more than four minutes before the buy.
+    ///          Each leaves the attacker's own capital in the pool across a
+    ///          block boundary where anyone may trade against it. A push
+    ///          left standing across the boundary between two minutes
+    ///          counts in both, so three pushes can do it; the pool is
+    ///          off-market for five blocks in all either way.
+    ///        - slow: ONE push to the target, left standing for nearly the
+    ///          whole window, which moves all five averages to it. One
+    ///          round trip of pool fees, as before, and the capital is
+    ///          exposed for minutes instead of seconds.
+    ///      So this changes the shape of the attack and what it exposes the
+    ///      attacker to. It is not a proof, and it is not a higher floor on
+    ///      fees: an attacker with capital whom nobody trades against for
+    ///      five minutes still passes. The bound on what passing is worth
+    ///      is `minOut`, taken from the feed. The vault's breaker reads the
+    ///      pushed spot and does not tighten it.
+    ///
+    ///      The band is on where the spot ENDS, not on how far it was moved:
+    ///      after an honest move to one edge of the band, a push to the
+    ///      other edge passes, which is a move of up to twice the band.
+    ///
+    ///      What it costs. A pool that honestly moves more than
+    ///      MAX_TWAP_DRIFT reverts too, and the buy waits for a retry, up to
+    ///      TWAP_WINDOW after the pool stops moving; a pool that keeps
+    ///      trending is refused for as long as it does. A pool with no
+    ///      observation
+    ///      TWAP_WINDOW old cannot be bought from at all (`NoPriceHistory`):
+    ///      a route's pool needs enough observation cardinality to always
+    ///      cover the window.
+    function _assertNotPushed(address pool) internal view {
+        (int24 spot, int24 low, int24 high) = _ticks(pool);
+        // In int256: the difference of two int24 cannot overflow there.
+        // low <= high, so at most one of these is the larger drift.
+        int256 above = int256(spot) - int256(low); // spot over the lowest mean
+        int256 below = int256(high) - int256(spot); // spot under the highest
+        if (above > MAX_TWAP_DRIFT || below > MAX_TWAP_DRIFT) {
+            revert PoolPushed(spot, above >= below ? low : high);
+        }
+    }
+
+    /// @dev The spot tick, and the lowest and the highest of the pool's
+    ///      TWAP_STEP mean ticks over the last TWAP_WINDOW. The spot is
+    ///      within MAX_TWAP_DRIFT of every mean exactly when it is within it
+    ///      of these two.
+    ///
+    ///      Each mean is computed the way Uniswap's OracleLibrary.consult
+    ///      computes it: the difference of two tick cumulatives over the
+    ///      step, rounded toward NEGATIVE infinity. Solidity's division
+    ///      truncates toward zero, which for a negative mean is one tick too
+    ///      high, and the pools this adapter trades sit at negative ticks.
+    ///
+    ///      What reverts `NoPriceHistory`: `observe` reverting (a pool whose
+    ///      oldest observation is younger than the window reverts "OLD"),
+    ///      the wrong number of cumulatives, or a mean outside int24. What
+    ///      does NOT: return data that does not decode as the two arrays
+    ///      fails OUTSIDE the catch and reverts bare, and a `slot0` that
+    ///      reverts bubbles up as it is. All of these revert the buy either
+    ///      way, and only a contract that is not a v3 pool can produce them.
+    function _ticks(address pool) internal view returns (int24 spot, int24 low, int24 high) {
+        (, spot,,,,) = ICLPool(pool).slot0();
+        uint256 steps = TWAP_WINDOW / TWAP_STEP;
+        uint32[] memory ago = new uint32[](steps + 1);
+        // ago = [300, 240, 180, 120, 60, 0]: oldest first, the last is now.
+        for (uint256 i; i < steps; ++i) {
+            ago[i] = TWAP_WINDOW - uint32(i) * TWAP_STEP;
+        }
+        try ICLPool(pool).observe(ago) returns (int56[] memory cum, uint160[] memory) {
+            if (cum.length != steps + 1) revert NoPriceHistory();
+            int256 step = int256(uint256(TWAP_STEP));
+            int256 lo = type(int256).max;
+            int256 hi = type(int256).min;
+            for (uint256 i; i < steps; ++i) {
+                // In int256, where neither the subtraction nor the rounding
+                // step can overflow, whatever the pool answered.
+                int256 delta = int256(cum[i + 1]) - int256(cum[i]);
+                int256 mean = delta / step;
+                if (delta < 0 && delta % step != 0) mean--;
+                if (mean < lo) lo = mean;
+                if (mean > hi) hi = mean;
+            }
+            // A real pool's ticks are within +-887272. A mean outside int24
+            // is not a price, and the casts below would silently truncate it.
+            if (lo < type(int24).min || hi > type(int24).max) revert NoPriceHistory();
+            low = int24(lo);
+            high = int24(hi);
+        } catch {
+            revert NoPriceHistory();
+        }
+    }
+
+    /// @notice The pool's spot tick, and the lowest and highest of its five
+    ///         one-minute mean ticks over the last TWAP_WINDOW seconds: the
+    ///         numbers `swapExactIn` compares before it swaps. A buy goes
+    ///         through only while `spot - low` and `high - spot` are both at
+    ///         most MAX_TWAP_DRIFT.
+    /// @dev    For a keeper or an interface that wants to ask first. It is
+    ///         the same read the swap makes, and reverts exactly when the
+    ///         swap's read would.
+    function ticks(address pool) external view returns (int24 spot, int24 low, int24 high) {
+        return _ticks(pool);
     }
 
     /// @dev Called back by the pool mid-swap to collect the input. ONE-SHOT:

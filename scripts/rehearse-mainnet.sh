@@ -39,11 +39,25 @@
 #   - the deploy, adapter binding, the four routes, finishSetup, the pause, the
 #     admin handover, the keeper allowlist, opening deposits, the USDC deposit,
 #     the Morpho supply leg, exitPlan and the 48-hour queue all run for real
-#     against forked state;
+#     against forked state. So do the reads the round-6 and 6b checks make:
+#     the oracle's sequencer uptime feed and its weekend rule, and each pool's
+#     five one-minute averages through the deployed swap adapter's ticks()
+#     (step 2);
 #   - a BUY cannot run. With a fresh feed createPlan's first buy fires and
 #     reverts at the stub (balanceOf on the token -> OpcodeNotFound), so the
-#     script shows that revert and then moves the fork's clock past the feed's
-#     heartbeat, where a deposit opens the plan with no first buy.
+#     script shows that revert. Then, WHATEVER DAY IT IS RUN ON, it moves the
+#     fork's clock past the feed's heartbeat, where a deposit opens the plan
+#     with no first buy: the steps after that do not depend on the calendar.
+#
+# THE WEEKEND. The oracle Deploy.s.sol builds is closed from Saturday 00:00 to
+# Monday 01:00 UTC: nothing is fresh then, whatever the feeds say. Run inside
+# that window, step 6 says so instead of calling the feed stale, and step 9
+# simulates the buys about 2 minutes after the feed's last update, or, when
+# that is itself inside the closure, one minute before the closure began. Run
+# outside it, nothing here changes. Either way the verdict means the same
+# thing. Step 9 also JUDGES the rule on any day: it asks isFresh on live
+# state one minute into the most recent closure (must be false, against a
+# print that is hours old) and one minute before it (must be true).
 # The buys are covered by step 9 instead: read-only eth_calls against the LIVE
 # node, with the bytecode and storage this rehearsal just produced injected as
 # a state override. The real node runs the precompile, so for each of the four
@@ -57,7 +71,8 @@
 #   KEEPER_ADDRESS   the keeper. Default: anvil account 2.
 #   REHEARSAL_PORT   default 8571.
 #   REHEARSAL_FORK_BLOCK  fork at this block instead of the head. A block in
-#                    market hours exercises the fresh-feed branch of step 6.
+#                    market hours exercises the fresh-feed branch of step 6,
+#                    and one on a Saturday or Sunday the weekend branch.
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -82,6 +97,7 @@ cfg() { node -e 'const c=require("./packages/config/addresses.base.json");consol
 USDC="$(cfg core.USDC.address)"
 MORPHO_VAULT="$(cfg yieldVault.address)"
 USDC_HOLDER="$(cfg core.AaveV3aUSDC.address)"   # Aave's aUSDC: holds the pool's USDC
+SEQ_FEED="$(cfg core.SequencerUptimeFeed.address)"
 # The launch routes, one per line: "<id> <ticker> <token> <pool> <feed>". The
 # id is the file's order from 1, which is what Deploy.s.sol lists them under
 # and what the web app looks them up by.
@@ -99,6 +115,7 @@ fail()   { printf '  FAIL     %s\n' "$1"; FAILS=$((FAILS + 1)); }
 notrun() { printf '  NOT RUN  %s\n' "$1"; NOTRUN=$((NOTRUN + 1)); }
 note()   { printf '           %s\n' "$1"; }
 lc()     { printf '%s' "$1" | tr 'A-F' 'a-f'; }
+utc()    { node -e 'const d=new Date(Number(process.argv[1])*1000);console.log(["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getUTCDay()]+" "+d.toISOString().slice(0,19).replace("T"," ")+" UTC")' "$1"; }
 eq()     { if [ "$(lc "$2")" = "$(lc "$3")" ]; then pass "$1 = $2"; else fail "$1 is $2, expected $3"; fi; }
 rd()     { cast call "$@" --rpc-url "$RPC" | awk 'NR==1{print $1}'; }
 rdall()  { cast call "$@" --rpc-url "$RPC" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//'; }
@@ -155,7 +172,15 @@ echo "admin (Safe stand-in) $ADMIN    keeper $KEEPER"
 
 # ----------------------------------------------------------------- deploy
 say "1. Deploy.s.sol, broadcast to the local fork"
-if ! ADMIN_MULTISIG="$ADMIN" forge script contracts/script/Deploy.s.sol:Deploy \
+# --force, ALWAYS. A script carries the creation code of what it deploys
+# inside its own build artifact, and forge 1.8.3 (dynamic_test_linking, on by
+# default) does not rebuild a script when only a function BODY in
+# contracts/src changed: without --force this step can deploy the code as it
+# was before the last edit, and every check below would then be describing a
+# vault the source no longer says. Measured in round 6b
+# (contracts/test/DeployScripts.t.sol, _sameCode). The real deploy needs the
+# same flag, or a `forge clean` first, for the same reason.
+if ! ADMIN_MULTISIG="$ADMIN" forge script contracts/script/Deploy.s.sol:Deploy --force \
       --rpc-url "$RPC" --private-key "$DEV_KEY" --broadcast >"$TMP/deploy.txt" 2>&1; then
   tail -40 "$TMP/deploy.txt"; fail "forge script failed"; echo; echo "REHEARSAL FAILED at the deploy."; exit 1
 fi
@@ -206,9 +231,66 @@ eq "vault.feeBps()"          "$(rd "$VAULT" 'feeBps()(uint16)')" "0"
 eq "vault.maxSlippageBps()"  "$(rd "$VAULT" 'maxSlippageBps()(uint16)')" "100"
 eq "vault.maxDeviationBps()" "$(rd "$VAULT" 'maxDeviationBps()(uint16)')" "500"
 eq "vault.feeRecipient()"    "$(rd "$VAULT" 'feeRecipient()(address)')" "$ADMIN"
+eq "oracle.sequencerUptimeFeed()" "$(rd "$ORACLE" 'sequencerUptimeFeed()(address)')" "$SEQ_FEED"
+# Round 6b. The oracle is built CLOSED ON WEEKENDS: immutable, like the uptime
+# feed, so a deploy without it could not be put right. Then its two public
+# views, each against its own source at one and the same fork block:
+# weekendClosed() against the UTC calendar, and sequencerUp() against the
+# uptime feed as read here.
+eq "oracle.closedOnWeekends()" "$(rd "$ORACLE" 'closedOnWeekends()(bool)')" "true"
+# The numbers the two checks run on, read from what was just deployed rather
+# than repeated from the source: a deployment built with other constants, or
+# with the single-average adapter (which has no TWAP_STEP), fails here.
+eq "oracle.WEEKEND_LENGTH() (49 hours)"  "$(rd "$ORACLE" 'WEEKEND_LENGTH()(uint256)')"  "176400"
+eq "oracle.HEARTBEAT() (24 hours)"       "$(rd "$ORACLE" 'HEARTBEAT()(uint256)')"       "86400"
+eq "oracle.SEQUENCER_GRACE() (1 hour)"   "$(rd "$ORACLE" 'SEQUENCER_GRACE()(uint256)')" "3600"
+eq "swapAdapter.TWAP_WINDOW() (300 s)"   "$(rd "$SWAP" 'TWAP_WINDOW()(uint32)')"        "300"
+eq "swapAdapter.TWAP_STEP() (60 s)"      "$(rd "$SWAP" 'TWAP_STEP()(uint32)')"          "60"
+eq "swapAdapter.MAX_TWAP_DRIFT() (100 ticks)" "$(rd "$SWAP" 'MAX_TWAP_DRIFT()(int24)')" "100"
+NOW_BLOCK="$(cast block-number --rpc-url "$RPC")"
+NOW_TS="$(cast block "$NOW_BLOCK" -f timestamp --rpc-url "$RPC")"
+BY_CALENDAR="$(node -e 'const d=new Date(Number(process.argv[1])*1000),w=d.getUTCDay();console.log(w===6||w===0||(w===1&&d.getUTCHours()<1))' "$NOW_TS")"
+eq "oracle.weekendClosed() at $(utc "$NOW_TS") (closed Sat 00:00 to Mon 01:00 UTC)" \
+   "$(cast call "$ORACLE" 'weekendClosed()(bool)' --block "$NOW_BLOCK" --rpc-url "$RPC")" "$BY_CALENDAR"
+set -- $(cast call "$SEQ_FEED" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' --block "$NOW_BLOCK" --rpc-url "$RPC" | awk '{print $1}' | tr '\n' ' ')
+BY_FEED="$(node -e 'const [answer,since,now]=process.argv.slice(1).map(Number);console.log(answer===0&&now>=since&&now-since>=3600)' "${2:-1}" "${3:-0}" "$NOW_TS")"
+eq "oracle.sequencerUp() (the uptime feed answers ${2:-nothing}, since ${3:-?}; up means 0 and for an hour)" \
+   "$(cast call "$ORACLE" 'sequencerUp()(bool)' --block "$NOW_BLOCK" --rpc-url "$RPC")" "$BY_FEED"
 while read -r id t tok pool feed <&3; do
   eq "vault.routes($id) $t"  "$(rdall "$VAULT" "$ROUTE_SIG" "$id")" "$tok $pool $feed 0 true"
   eq "oracle.feedOf($t)"     "$(rd "$ORACLE" 'feedOf(address)(address)' "$tok")" "$feed"
+  # The read the swap adapter makes before every buy: the pool's spot tick,
+  # and the lowest and highest of its own five one-minute mean ticks. A pool
+  # that cannot answer it is a route that cannot buy. How far apart they are
+  # is the market's business: more than 100 ticks from either a buy waits,
+  # and that is said rather than failed.
+  TICKS="$(cast call "$SWAP" 'ticks(address)(int24,int24,int24)' "$pool" --block "$NOW_BLOCK" --rpc-url "$RPC" 2>/dev/null | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//' || true)"
+  if printf '%s' "$TICKS" | grep -Eq '^-?[0-9]+ -?[0-9]+ -?[0-9]+$'; then
+    set -- $TICKS
+    OVER=$(( $1 - $2 )); UNDER=$(( $3 - $1 ))
+    pass "swapAdapter.ticks($t pool): spot $1, its five 60 s means run from $2 to $3 (the band is 100 ticks from each)"
+    if [ "$OVER" -gt 100 ] || [ "$UNDER" -gt 100 ]; then
+      note "outside the band: a buy on $t would revert PoolPushed until every one of the five averages catches up."
+    fi
+    # The same five means, worked out here from the pool's own observe() at
+    # the same block: floor((cum[i+1] - cum[i]) / 60) for each minute. What the
+    # adapter calls the lowest and the highest must be the lowest and highest
+    # of these. (When the pool has not moved in five minutes all five are
+    # equal, and this row cannot tell five averages from one. The constants
+    # above and the source verification after the deploy are what do.)
+    WANT="$(cast call "$pool" 'observe(uint32[])(int56[],uint160[])' '[300,240,180,120,60,0]' --block "$NOW_BLOCK" --rpc-url "$RPC" 2>/dev/null | head -1 | node -e '
+      let line = require("fs").readFileSync(0, "utf8").split("\n")[0] || "";
+      line = line.replace(/^\[/, "").replace(/\]\s*$/, "").replace(/\[[^\]]*\]/g, "");
+      const cum = (line.match(/-?\d+/g) || []).map(BigInt);
+      if (cum.length !== 6) { console.log("unreadable"); process.exit(0); }
+      const means = [];
+      for (let i = 0; i < 5; i++) { const d = cum[i + 1] - cum[i]; let m = d / 60n; if (d < 0n && d % 60n !== 0n) m -= 1n; means.push(m); }
+      const lo = means.reduce((a, b) => (b < a ? b : a)), hi = means.reduce((a, b) => (b > a ? b : a));
+      console.log(`${lo} ${hi}`);' || true)"
+    eq "swapAdapter.ticks($t pool) low and high against the pool's own observe([300,240,180,120,60,0])" "$2 $3" "$WANT"
+  else
+    fail "swapAdapter.ticks($t pool) did not answer: a buy on this route would revert NoPriceHistory"
+  fi
 done 3<<EOF
 $ROUTES
 EOF
@@ -259,6 +341,19 @@ eq "vault.pendingAdmin()"  "$(rd "$VAULT" 'pendingAdmin()(address)')" "$ZERO"
 eq "oracle.pendingAdmin()" "$(rd "$ORACLE" 'pendingAdmin()(address)')" "$ZERO"
 expect_revert "setKeeper from the old deployer" NotOwner "$VAULT" 'setKeeper(address,bool)' "$KEEPER" true --from "$DEPLOYER"
 expect_revert "setDepositsPaused(false) from the old deployer" NotOwner "$VAULT" 'setDepositsPaused(bool)' false --from "$DEPLOYER"
+# Rounds 6 and 6b: the fee recipient cannot be the vault, either adapter or
+# the oracle. Nothing can be swept from any of the four, so fees claimed there
+# would stay for good. Calls, not sends: the recipient is left as deployed.
+expect_revert "setFeeRecipient(the vault)"         BadParams "$VAULT" 'setFeeRecipient(address)' "$VAULT"  --from "$ADMIN"
+expect_revert "setFeeRecipient(the yield adapter)" BadParams "$VAULT" 'setFeeRecipient(address)' "$YIELD"  --from "$ADMIN"
+expect_revert "setFeeRecipient(the swap adapter)"  BadParams "$VAULT" 'setFeeRecipient(address)' "$SWAP"   --from "$ADMIN"
+expect_revert "setFeeRecipient(the oracle)"        BadParams "$VAULT" 'setFeeRecipient(address)' "$ORACLE" --from "$ADMIN"
+if cast call "$VAULT" 'setFeeRecipient(address)' "$KEEPER" --from "$ADMIN" --rpc-url "$RPC" >/dev/null 2>&1; then
+  pass "setFeeRecipient(an ordinary address) is accepted (control: the four above are refused for what they are)"
+else
+  fail "setFeeRecipient(an ordinary address) reverted: the four refusals above prove nothing"
+fi
+eq "vault.feeRecipient(), unchanged" "$(rd "$VAULT" 'feeRecipient()(address)')" "$ADMIN"
 
 say "5. The Safe allowlists the keeper, and THEN, as its own step, opens deposits"
 send "$VAULT" 'setKeeper(address,bool)' "$KEEPER" true --from "$ADMIN" --unlocked
@@ -279,6 +374,13 @@ send "$USDC" 'transfer(address,uint256)' "$DEPOSITOR" 1000000000 --from "$USDC_H
 cast rpc anvil_stopImpersonatingAccount "$USDC_HOLDER" --rpc-url "$RPC" >/dev/null
 send "$USDC" 'approve(address,uint256)' "$VAULT" 100000000 --private-key "$DEPOSITOR_KEY"
 
+# Round 6 (R5-5): the LAST period is held to the 1 USDC minimum too. A deposit
+# that leaves a dust tail is refused before anything moves.
+expect_revert "createPlan with a 2-wei last period (100.000002 USDC at 10 a day)" BadParams "$VAULT" "$PLAN_SIG" 1 100000002 10000000 86400 --from "$DEPOSITOR"
+expect_revert "createPlan with a last period one wei under 1 USDC"               BadParams "$VAULT" "$PLAN_SIG" 1 100999999 10000000 86400 --from "$DEPOSITOR"
+
+# Is anything fresh at the fork block, and if not, why not. Three answers, and
+# the day of the week picks between them; none of them is a failure.
 if [ "$(rd "$ORACLE" 'isFresh(address)(bool)' "$NVDAC")" = "true" ]; then
   note "the NVDA feed is FRESH at the fork block: createPlan's first buy will fire."
   OUT="$(cast call "$VAULT" "$PLAN_SIG" 1 100000000 10000000 86400 --from "$DEPOSITOR" --rpc-url "$RPC" 2>&1 || true)"
@@ -287,11 +389,18 @@ if [ "$(rd "$ORACLE" 'isFresh(address)(bool)' "$NVDAC")" = "true" ]; then
   else
     fail "createPlan with a fresh feed did not revert on the fork. B20 may no longer be a stub: re-read Fork.t.sol's test_Fork_B20IsNativePrecompile."
   fi
-  note "moving the fork's clock 25 h on, past the feed's 24 h heartbeat, to exercise the lending leg."
-  cast rpc evm_increaseTime 90000 --rpc-url "$RPC" >/dev/null; cast rpc evm_mine --rpc-url "$RPC" >/dev/null
+elif [ "$(rd "$ORACLE" 'weekendClosed()(bool)')" = "true" ]; then
+  note "nothing is fresh at the fork block: the oracle's WEEKEND RULE is closed (Sat 00:00 to Mon 01:00 UTC), whatever the feed's age. A plan opens with no first buy."
 else
-  note "the NVDA feed is STALE at the fork block (weekend): the plan opens with no first buy."
+  note "the NVDA feed is not fresh at the fork block and it is not the weekend rule: its last print is past the 24 h heartbeat, or the sequencer check says no. A plan opens with no first buy."
 fi
+# Whichever it was, put the fork where the answer cannot change under the
+# steps below. A feed that is only closed by the weekend rule turns fresh at
+# Monday 01:00 UTC, and a run that started at 00:55 would find step 7's
+# executeDCA no longer reverting StaleOracle. Past its heartbeat the fork's
+# frozen feed is stale on any day of the week.
+note "moving the fork's clock 25 h on, past the feed's 24 h heartbeat: from here on the feed is stale whatever the day."
+cast rpc evm_increaseTime 90000 --rpc-url "$RPC" >/dev/null; cast rpc evm_mine --rpc-url "$RPC" >/dev/null
 eq "oracle.isFresh(NVDAc)" "$(rd "$ORACLE" 'isFresh(address)(bool)' "$NVDAC")" "false"
 
 send "$VAULT" "$PLAN_SIG" 1 100000000 10000000 86400 --private-key "$DEPOSITOR_KEY"
@@ -334,8 +443,14 @@ not_admin
 
 # ------------------------------------------------ the leg a fork cannot run
 say "9. The buys, simulated against the LIVE node (read-only eth_call, state override)"
-# createPlan's first buy needs a fresh feed. On a weekend, simulate at a block
-# shortly after the NVDA feed's last update instead of at the head.
+# createPlan's first buy needs isFresh: a print inside the 24 h heartbeat AND a
+# block outside the oracle's weekend closure (Sat 00:00 to Mon 01:00 UTC). So
+# the block to simulate at is:
+#   - the head, when it is outside the closure and the feed is young;
+#   - otherwise about 2 minutes after the NVDA feed's last update;
+#   - and if THAT is inside a closure too (the feed's last print of the week
+#     can land at or after Saturday 00:00 UTC), one minute before the closure
+#     began, where the print then in force was fresh.
 ROUND="$(live call "$NVDAC_FEED" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' 2>/dev/null | awk '{print $1}' | tr '\n' ' ' || true)"
 set -- $ROUND
 UPDATED="${4:-0}"
@@ -344,14 +459,59 @@ HEAD_TS="$(live block "$HEAD" -f timestamp 2>/dev/null || echo 0)"
 if [ "$UPDATED" = "0" ] || [ "$HEAD" = "0" ]; then
   notrun "could not read the live feed or head from $FORK_URL"
 else
-  AGE=$(( HEAD_TS - UPDATED ))
-  if [ "$AGE" -le 86000 ]; then
-    AT="$HEAD"; note "the live NVDA feed is $AGE s old: simulating at the head, block $AT"
-  else
-    AT=$(( HEAD - (AGE - 120) / 2 ))   # Base blocks are 2 s
-    note "the live NVDA feed is $AGE s old (frozen): simulating at block $AT, ~2 minutes after its last update"
-  fi
+  eval "$(node -e '
+    const [head, headTs, updated] = process.argv.slice(1).map(Number);
+    const DAY = 86400, WEEK = 7 * DAY, LEN = 49 * 3600;
+    const since = (t) => (t + 5 * DAY) % WEEK;   // seconds since Saturday 00:00 UTC
+    const closed = (t) => since(t) < LEN;        // ChainlinkOracle.weekendClosed()
+    const age = headTs - updated;
+    let ts = headTs, why = `the live NVDA feed is ${age} s old and the weekend rule is open: simulating at the head`;
+    if (closed(headTs) || age > 86000) {
+      ts = updated + 120;
+      why = (closed(headTs) ? "the live head is inside the weekend closure" : `the live NVDA feed is ${age} s old (frozen)`)
+        + ": simulating about 2 minutes after the last update of the feed";
+      if (closed(ts)) { ts = ts - since(ts) - 60; why += "; that is inside the weekend closure, so one minute before the closure began instead"; }
+    }
+    const at = head - Math.ceil((headTs - ts) / 2);   // Base blocks are 2 s
+    console.log(`AT=${at} AT_WHY="${why}: block ${at}, about ${new Date(ts * 1000).toISOString()}"`);
+  ' "$HEAD" "$HEAD_TS" "$UPDATED")"
+  note "$AT_WHY"
   slot() { cast index address "$1" "$2"; }
+
+  # THE WEEKEND RULE, JUDGED. closedOnWeekends() and weekendClosed() are read
+  # in step 2, but an oracle whose isFresh ignored them would pass those rows.
+  # So ask isFresh itself, on live state, one minute into the most recent
+  # weekend closure and one minute before it. Inside, the feed's last print is
+  # hours old, well within the 24 h heartbeat, so only the rule can make the
+  # answer false. Just before it, the same print has to read fresh.
+  eval "$(node -e '
+    const [head, headTs] = process.argv.slice(1).map(Number);
+    const DAY = 86400, WEEK = 7 * DAY;
+    const sat = headTs - ((headTs + 5 * DAY) % WEEK);          // the most recent Saturday 00:00 UTC
+    const blockAt = (ts) => head - Math.ceil((headTs - ts) / 2); // Base blocks are 2 s
+    console.log(`WK_IN=${blockAt(sat + 60)} WK_OUT=${blockAt(sat - 60)} WK_SAT=${sat}`);
+  ' "$HEAD" "$HEAD_TS")"
+  WK_IN_TS="$(live block "$WK_IN" -f timestamp 2>/dev/null || echo 0)"
+  WK_OUT_TS="$(live block "$WK_OUT" -f timestamp 2>/dev/null || echo 0)"
+  WK_UPD="$(live call "$NVDAC_FEED" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' --block "$WK_IN" 2>/dev/null | awk 'NR==4{print $1}' || true)"
+  IN_FRESH="$(live call "$ORACLE" 'isFresh(address)(bool)' "$NVDAC" --block "$WK_IN" --override-code "$OV_CODE" --override-state-diff "$OV_OPEN" 2>&1 || true)"
+  IN_CLOSED="$(live call "$ORACLE" 'weekendClosed()(bool)' --block "$WK_IN" --override-code "$OV_CODE" --override-state-diff "$OV_OPEN" 2>&1 || true)"
+  OUT_FRESH="$(live call "$ORACLE" 'isFresh(address)(bool)' "$NVDAC" --block "$WK_OUT" --override-code "$OV_CODE" --override-state-diff "$OV_OPEN" 2>&1 || true)"
+  OUT_CLOSED="$(live call "$ORACLE" 'weekendClosed()(bool)' --block "$WK_OUT" --override-code "$OV_CODE" --override-state-diff "$OV_OPEN" 2>&1 || true)"
+  if printf '%s' "$WK_UPD" | grep -q '^[0-9][0-9]*$' && [ "$WK_IN_TS" != "0" ] && [ "$WK_OUT_TS" != "0" ] \
+     && printf '%s%s%s%s' "$IN_FRESH" "$IN_CLOSED" "$OUT_FRESH" "$OUT_CLOSED" | grep -Eq '^(true|false){4}$'; then
+    WK_AGE=$(( WK_IN_TS - WK_UPD ))
+    if [ "$WK_AGE" -lt 86400 ] && [ "$WK_IN_TS" -ge "$WK_SAT" ] && [ "$WK_OUT_TS" -lt "$WK_SAT" ]; then
+      eq "oracle.weekendClosed() at $(utc "$WK_IN_TS"), inside the last closure (live state)" "$IN_CLOSED" "true"
+      eq "oracle.isFresh(NVDAc) there, with a print only $WK_AGE s old: the weekend rule alone says no" "$IN_FRESH" "false"
+      eq "oracle.weekendClosed() at $(utc "$WK_OUT_TS"), a minute before it" "$OUT_CLOSED" "false"
+      eq "oracle.isFresh(NVDAc) there, against the same print" "$OUT_FRESH" "true"
+    else
+      notrun "the weekend rule on live state: the blocks picked do not straddle Saturday 00:00 UTC with a print inside the heartbeat (in $WK_IN_TS, out $WK_OUT_TS, print age $WK_AGE s)"
+    fi
+  else
+    notrun "the weekend rule on live state: the RPC did not answer at blocks $WK_IN / $WK_OUT (historical state with a state override unsupported?): $(printf '%s' "$IN_FRESH" | head -1 | cut -c1-160)"
+  fi
   USD_PROBE="$USDC:$(slot "$PROBE" 9):$(cast to-uint256 100000000),$USDC:$(slot "$VAULT" "$(slot "$PROBE" 10)"):$(cast to-uint256 100000000)"
   USD_VAULT="$USDC:$(slot "$VAULT" 9):$(cast to-uint256 10000000),$USDC:$(slot "$SWAP" "$(slot "$VAULT" 10)"):$(cast to-uint256 10000000)"
 
@@ -373,7 +533,7 @@ else
   while read -r id t tok pool feed <&3; do
     FRESH="$(live call "$ORACLE" 'isFresh(address)(bool)' "$tok" --block "$AT" --override-code "$OV_CODE" --override-state-diff "$OV_OPEN" 2>&1 || true)"
     if [ "$FRESH" != "true" ]; then
-      notrun "$t: its feed is not fresh at block $AT in the live simulation ($(printf '%s' "$FRESH" | head -1 | cut -c1-100)), so no buy would fire. Run again in market hours."
+      notrun "$t: the oracle does not call its feed fresh at block $AT in the live simulation ($(printf '%s' "$FRESH" | head -1 | cut -c1-100)), so no buy would fire. Run again in market hours."
       continue
     fi
     PX="$(live call "$feed" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' --block "$AT" 2>/dev/null | awk 'NR==2{print $1}' || true)"

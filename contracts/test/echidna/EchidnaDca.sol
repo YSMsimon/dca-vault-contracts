@@ -119,8 +119,20 @@ contract EchidnaDca {
     function create(uint8 who, uint256 dep, uint8 months, uint32 iv) public {
         dep = 1 + dep % 200_000e6;
         uint256 m = 3 + months % 58;
-        uint256 inst = dep / m;
-        if (inst == 0) inst = dep;
+        // Rounded up: the last period is the short one. Rounded down, the
+        // remainder was an extra period of a few wei, which the vault refuses
+        // since round 6 (R5-5), and almost no multi-period plan was created.
+        uint256 inst = (dep + m - 1) / m;
+        // Round 6b (review finding 8). Rounded up, every last period is
+        // within `m` wei of a full one, so the edge R5-5 made, a last period
+        // of barely the minimum, was never in a run. One create in four
+        // (bits 2 and 3 of `who`; the low two pick the user) builds it: one
+        // to three whole periods, few enough for a sequence to reach the
+        // last one, then a tail of 1 USDC plus 0 to 15 wei.
+        if ((who >> 2) % 4 == 3) {
+            inst = 2e6 + dep % 2_000e6;
+            dep = (1 + m % 3) * inst + 1e6 + (who >> 4);
+        }
         _create(who, dep, inst, uint64(1 days + uint256(iv) % 90 days));
     }
 

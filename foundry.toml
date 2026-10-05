@@ -13,6 +13,17 @@ solc = "0.8.26"
 optimizer = true
 optimizer_runs = 200
 via_ir = false
+# OFF, and it has to stay off. Foundry 1.8 turns dynamic test linking on by
+# default: after a change to a function BODY in contracts/src, forge
+# recompiles that one file, tests link the new code at run time, and a
+# SCRIPT keeps the old creation code in its artifact and deploys it.
+# Reproduced on forge 1.8.3 (2026-10-05): a one-line change to
+# ChainlinkOracle, then `forge script` with no --force, deployed the code from
+# before the change. With this off, every dependent is recompiled. The deploy
+# commands also pass --force, and DeployScripts.t.sol and ForkDeploy.t.sol
+# compare what the mainnet script deployed with a fresh build, contract by
+# contract (for the local and Sepolia scripts, the vault only).
+dynamic_test_linking = false
 
 # Declaring fs_permissions at all REPLACES the default allowlist, so every path
 # a test or script touches has to be named. The deploy scripts write the

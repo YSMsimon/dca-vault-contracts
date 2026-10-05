@@ -15,36 +15,72 @@
  *
  * What it checks
  *   core        USDC (symbol, decimals), Morpho Blue, Aave pool and aUSDC: code
- *               exists and the contracts name each other.
+ *               exists and the contracts name each other. The sequencer
+ *               uptime feed: its description is the one in the file, it
+ *               answers latestRoundData inside the gas the oracle gives it,
+ *               and it says the sequencer is up.
  *   yieldVault  ERC-4626, asset() is USDC, MORPHO() is the core Morpho Blue,
  *               totalAssets reported.
  *   routes      token code is EXACTLY the one-byte B20 stub 0xef and the node
  *               answers decimals() = 8; the pool pairs USDC with that token,
- *               tickSpacing and observationCardinality match, liquidity > 0;
+ *               tickSpacing and observationCardinality match, liquidity > 0,
+ *               and it answers observe([300, 240, 180, 120, 60, 0]) with six
+ *               cumulatives, which the swap adapter asks before every buy
+ *               (its spot against each of the five one-minute averages is
+ *               reported);
  *               the feed is 8 decimals, its description names the stock, and
  *               its age is reported.
+ *   weekend     the oracle's weekend rule (Saturday 00:00 to Monday 01:00 UTC),
+ *               worked out the contract's way and from the UTC calendar: the
+ *               two must agree, and whether it is closing buys right now is
+ *               reported.
+ *   sources     the numbers this script repeats from the contracts (the push
+ *               check's window, step and band; the oracle's heartbeat, gas,
+ *               grace and weekend length) still equal the contracts'.
  *   script      contracts/script/Deploy.s.sol repeats the addresses instead of
  *               reading the file, so: every constant equals the file, every
  *               route is listed under the id the web app looks it up by (the
  *               file's order, from 1) with its own pool and feed, and the
  *               script still records setDepositsPaused(true) before the admin
  *               handover starts and ends with finishSetup(), so the deploy
- *               leaves deposits paused.
+ *               leaves deposits paused. The oracle is constructed with the
+ *               sequencer uptime feed, and that constant equals the file; and
+ *               with the weekend rule ON, as the literal `true`.
+ *
+ * WHAT IT CANNOT SEE. It reads addresses, constants and a few lines of source
+ * text. It runs none of the contracts' code, so an `isFresh` that ignored the
+ * weekend rule, or a swap adapter that compared against one average and not
+ * five, would still read ALL OK here. Behaviour is what the tests and
+ * scripts/rehearse-mainnet.sh are for.
  *
  * A STALE FEED IS NOT A MISMATCH. B20 feeds are 24/5 and frozen over the
  * weekend, so `feed age` is reported as INFO with a note, never as a failure.
  * A feed older than MAX_FEED_AGE_DAYS (5) is a failure: that is not a weekend.
+ * Nor is a closed weekend a mismatch: it is reported, and the notes say what
+ * the vault would do.
  */
 import { readFileSync } from "node:fs";
 
 const RPC = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const PACE_MS = Number(process.env.VERIFY_PACE_MS ?? 250);
-const HEARTBEAT = 86_400;
 const MAX_FEED_AGE_DAYS = 5;
+// ChainlinkOracle.HEARTBEAT, FEED_GAS, SEQUENCER_GRACE and WEEKEND_LENGTH.
+const HEARTBEAT = 86_400;
+const FEED_GAS = 100_000;
+const SEQUENCER_GRACE = 3_600;
+const WEEKEND_LENGTH = 49 * 3_600;
+// AerodromeSwapAdapter.TWAP_WINDOW, TWAP_STEP and MAX_TWAP_DRIFT.
+const TWAP_WINDOW = 300;
+const TWAP_STEP = 60;
+const MAX_TWAP_DRIFT = 100;
 const B20_STUB = "0xef";
+// What the adapter passes to observe(): [300, 240, 180, 120, 60, 0].
+const TWAP_OFFSETS = Array.from({ length: TWAP_WINDOW / TWAP_STEP + 1 }, (_, i) => TWAP_WINDOW - i * TWAP_STEP);
 
 const cfg = JSON.parse(readFileSync(new URL("../packages/config/addresses.base.json", import.meta.url), "utf8"));
 const deploySol = readFileSync(new URL("../contracts/script/Deploy.s.sol", import.meta.url), "utf8");
+const oracleSol = readFileSync(new URL("../contracts/src/adapters/ChainlinkOracle.sol", import.meta.url), "utf8");
+const adapterSol = readFileSync(new URL("../contracts/src/adapters/AerodromeSwapAdapter.sol", import.meta.url), "utf8");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -78,7 +114,7 @@ async function rpc(method, params) {
   throw new Error(`${method} failed after retries: ${last}`);
 }
 
-const call = async (to, data) => rpc("eth_call", [{ to, data }, "latest"]);
+const call = async (to, data, gas) => rpc("eth_call", [gas ? { to, data, gas: "0x" + gas.toString(16) } : { to, data }, "latest"]);
 const code = async (a) => (await rpc("eth_getCode", [a, "latest"])).result;
 
 // ---- minimal ABI decoding: static words, addresses, and one dynamic string.
@@ -100,6 +136,7 @@ const SEL = {
   token0: "0x0dfe1681", token1: "0xd21220a7", tickSpacing: "0xd0c93a7c",
   liquidity: "0x1a686502", slot0: "0x3850c7bd", factory: "0xc45a0155",
   description: "0x7284e416", latestRoundData: "0xfeaf968c", owner: "0x8da5cb5b",
+  observe: "0x883bdbfd",
   UNDERLYING: "0xb16a19de", POOL: "0x7535d246", getReserveData: "0x35ea6a75",
   balanceOf: "0x70a08231",
 };
@@ -113,8 +150,8 @@ function row(field, expected, actual, ok) {
   rows.push([field, String(expected), String(actual), verdict]);
 }
 /** A read that must answer; a revert is recorded as the actual value. */
-async function read(to, data, decode) {
-  const r = await call(to, data);
+async function read(to, data, decode, gas) {
+  const r = await call(to, data, gas);
   if (r.reverted !== undefined) return { ok: false, value: `reverted (${r.reverted})` };
   if (!r.result || r.result === "0x") return { ok: false, value: "empty return" };
   try { return { ok: true, value: decode(r.result), raw: r.result }; }
@@ -144,8 +181,32 @@ const head = (await rpc("eth_getBlockByNumber", ["latest", false])).result;
 const now = Number(BigInt(head.timestamp));
 const headNo = Number(BigInt(head.number));
 
+// ---------------------------------------------------------------- weekend
+// ChainlinkOracle.weekendClosed(), for an oracle built with closedOnWeekends:
+// (block.timestamp + 5 days) % 7 days < WEEKEND_LENGTH. While it is true
+// isFresh is false for every token, whatever the feeds say. Worked out here
+// the contract's way AND from the UTC calendar, which knows nothing about
+// 1970: the two have to agree, and that is the judged row. Whether it is
+// closed right now is INFO.
+const DAY = 86_400, WEEK = 7 * DAY;
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const utc = (t) => `${DAYS[new Date(t * 1000).getUTCDay()]} ${new Date(t * 1000).toISOString().slice(0, 19).replace("T", " ")} UTC`;
+const sinceSaturday = (now + 5 * DAY) % WEEK;
+const weekendClosed = sinceSaturday < WEEKEND_LENGTH;
+{
+  const d = new Date(now * 1000), day = d.getUTCDay();
+  const byCalendar = day === 6 || day === 0 || (day === 1 && d.getUTCHours() < 1);
+  row("weekend rule: (timestamp + 5 days) % 7 days < 49 hours", `the UTC calendar: ${byCalendar ? "closed" : "open"} (Sat 00:00 to Mon 01:00 UTC is closed)`,
+    `${weekendClosed ? "closed" : "open"} at ${utc(now)}`, weekendClosed === byCalendar);
+  const saturday = now - sinceSaturday;
+  row("weekend rule at the head block", "reported",
+    weekendClosed
+      ? `CLOSED until ${utc(saturday + WEEKEND_LENGTH)}: isFresh is false for every token whatever its feed says, so a deposit opens a plan with no first buy and executions revert StaleOracle`
+      : `open: it does not stop a buy. It next closes at ${utc(saturday + WEEK)}`, null);
+}
+
 // ------------------------------------------------------------------- core
-const { USDC, MorphoBlue, AaveV3Pool, AaveV3aUSDC } = cfg.core;
+const { USDC, MorphoBlue, AaveV3Pool, AaveV3aUSDC, SequencerUptimeFeed } = cfg.core;
 
 await expectCode("core.USDC", USDC.address);
 await expectEq("core.USDC symbol()", USDC.address, SEL.symbol, str, "USDC", (a, b) => a === b);
@@ -170,6 +231,27 @@ await expectCode("core.AaveV3aUSDC", AaveV3aUSDC.address);
 await expectEq("core.AaveV3aUSDC decimals()", AaveV3aUSDC.address, SEL.decimals, (h) => Number(uint(h)), AaveV3aUSDC.decimals, (a, b) => a === b);
 await expectEq("core.AaveV3aUSDC UNDERLYING_ASSET_ADDRESS()", AaveV3aUSDC.address, SEL.UNDERLYING, addr, USDC.address);
 await expectEq("core.AaveV3aUSDC POOL()", AaveV3aUSDC.address, SEL.POOL, addr, AaveV3Pool.address);
+
+// The sequencer uptime feed. The oracle is built with this address and can
+// never change it, and it IGNORES an uptime feed it cannot read. So a wrong
+// address here does not fail a deploy or a buy: it silently switches the
+// check off. This is where a wrong one is caught.
+await expectCode("core.SequencerUptimeFeed", SequencerUptimeFeed.address);
+await expectEq("core.SequencerUptimeFeed description()", SequencerUptimeFeed.address, SEL.description, str, SequencerUptimeFeed.description, (a, b) => a === b);
+{
+  // Asked with the gas the oracle allows the feed (ChainlinkOracle.FEED_GAS):
+  // an answer that needs more than that reads, to the oracle, as no answer.
+  const r = await read(SequencerUptimeFeed.address, SEL.latestRoundData,
+    (h) => ({ words: (h.length - 2) / 64, answer: int(h, 1), startedAt: Number(uint(h, 2)) }), FEED_GAS);
+  row(`core.SequencerUptimeFeed latestRoundData() with ${FEED_GAS} gas`, "answers five words", r.ok ? `${r.value.words} words` : r.value, r.ok && r.value.words >= 5);
+  if (r.ok) {
+    row("core.SequencerUptimeFeed answer", "0 (the sequencer is up)", r.value.answer, r.value.answer === 0n);
+    const upFor = now - r.value.startedAt;
+    const settled = upFor >= SEQUENCER_GRACE;
+    row("core.SequencerUptimeFeed up for (s)", `>= ${SEQUENCER_GRACE} for a price to count as fresh`,
+      `${upFor} s (${(upFor / 86_400).toFixed(1)} d), since ${new Date(r.value.startedAt * 1000).toISOString()}${settled ? "" : " - inside the grace: the vault would not buy"}`, null);
+  }
+}
 
 // -------------------------------------------------------------- yieldVault
 const yv = cfg.yieldVault;
@@ -209,6 +291,34 @@ for (const rt of cfg.routes) {
   const s0 = await read(rt.pool, SEL.slot0, (h) => ({ sqrtP: uint(h, 0), tick: Number(int(h, 1)), card: Number(uint(h, 3)), unlocked: uint(h, 5) === 1n }));
   row(`${t} pool slot0().observationCardinality`, rt.observationCardinality, s0.ok ? s0.value.card : s0.value, s0.ok && s0.value.card === rt.observationCardinality);
   {
+    // What AerodromeSwapAdapter asks before every buy: observe([300, 240,
+    // 180, 120, 60, 0]), and exactly six cumulatives back. A pool that cannot
+    // answer is a route that cannot buy (NoPriceHistory). From them, five
+    // one-minute mean ticks, each rounded toward negative infinity. The spot
+    // against them is INFO: it moves, and more than MAX_TWAP_DRIFT from ANY
+    // of the five a buy waits (PoolPushed) rather than being wrong.
+    const n = TWAP_OFFSETS.length;
+    const args = pad("0x20") + pad("0x" + n.toString(16)) + TWAP_OFFSETS.map((o) => pad("0x" + o.toString(16))).join("");
+    const r = await read(rt.pool, SEL.observe + args, (h) => {
+      const at = Number(uint(h, 0)) / 32;
+      if (uint(h, at) !== BigInt(n)) throw new Error(`${uint(h, at)} cumulatives, expected ${n}`);
+      const w = BigInt(TWAP_STEP), means = [];
+      for (let i = 0; i < n - 1; i++) {
+        const d = int(h, at + 2 + i) - int(h, at + 1 + i);
+        means.push(Number(d / w - (d < 0n && d % w !== 0n ? 1n : 0n))); // rounds toward negative infinity
+      }
+      return means;
+    });
+    row(`${t} pool observe([${TWAP_OFFSETS.join(", ")}])`, `answers ${n} cumulatives`, r.ok ? `${TWAP_STEP} s mean ticks, oldest first: ${r.value.join(", ")}` : r.value, r.ok);
+    if (r.ok && s0.ok) {
+      const low = Math.min(...r.value), high = Math.max(...r.value), spot = s0.value.tick;
+      const above = spot - low, below = high - spot; // the adapter's two comparisons
+      const pushed = above > MAX_TWAP_DRIFT || below > MAX_TWAP_DRIFT;
+      row(`${t} pool spot vs its five ${TWAP_STEP} s means`, `<= ${MAX_TWAP_DRIFT} ticks from every one for a buy to go through`,
+        `spot ${spot}, lowest mean ${low}, highest ${high}: ${Math.max(above, 0)} over the lowest, ${Math.max(below, 0)} under the highest${pushed ? " - a buy would revert PoolPushed right now" : ""}`, null);
+    }
+  }
+  {
     const r = await read(rt.pool, SEL.factory, addr);
     row(`${t} pool factory()`, "reported", r.value, null);
   }
@@ -228,9 +338,11 @@ for (const rt of cfg.routes) {
   row(`${t} feed answer`, "> 0", `$${px.toFixed(2)}`, rd.value.answer > 0n);
   const age = now - rd.value.updatedAt;
   const fresh = age >= 0 && age <= HEARTBEAT;
-  const note = fresh
-    ? "fresh: the vault would buy"
-    : "STALE for the vault (isFresh=false): deposits open a plan with no first buy, executions revert StaleOracle. Expected Fri close to Mon open";
+  const note = !fresh
+    ? "STALE for the vault (isFresh=false): deposits open a plan with no first buy, executions revert StaleOracle. Expected Fri close to Mon open"
+    : weekendClosed
+      ? "inside its heartbeat, but the weekend rule is CLOSED (isFresh=false): deposits open a plan with no first buy, executions revert StaleOracle"
+      : "fresh: the vault would buy";
   row(`${t} feed age (s)`, `<= ${HEARTBEAT} to be fresh; <= ${MAX_FEED_AGE_DAYS}d to be alive`,
     `${age} s (${(age / 3600).toFixed(1)} h), updatedAt ${new Date(rd.value.updatedAt * 1000).toISOString()} - ${note}`,
     age >= 0 && age <= MAX_FEED_AGE_DAYS * 86_400 ? null : false);
@@ -271,7 +383,7 @@ for (const rt of cfg.routes) {
 // for every route the file lists, and each must be listed under the id the web
 // app will look it up by (the file's order, 1-based).
 {
-  const want = { USDC: USDC.address, MORPHO_VAULT: yv.address };
+  const want = { USDC: USDC.address, MORPHO_VAULT: yv.address, SEQUENCER_UPTIME_FEED: SequencerUptimeFeed.address };
   for (const rt of cfg.routes) {
     const K = rt.ticker.toUpperCase(); // NVDAc -> NVDAC
     want[K] = rt.token;
@@ -292,11 +404,29 @@ for (const rt of cfg.routes) {
     const fed = new RegExp(`oracle\\.setFeed\\(\\s*${K}\\s*,\\s*${K}_FEED\\s*\\)`).test(deploySol);
     row(`Deploy.s.sol oracle.setFeed(${K}, ${K}_FEED)`, "present", fed ? "present" : "missing", fed);
   });
+  // Comments out: nothing below may be satisfied by a sentence about the code.
+  const body = deploySol.replace(/\/\/.*$/gm, "");
+  // The constant matching the file is not enough: it has to be what the
+  // oracle is built with, and both arguments are immutable in the oracle.
+  //   new ChainlinkOracle(address(0), ...)  has no sequencer check;
+  //   new ChainlinkOracle(..., false)       buys against Friday's print on a
+  //                                         Saturday.
+  // The second has to be the LITERAL `true`: a variable or an expression
+  // there is something this script cannot vouch for.
+  {
+    const all = [...body.matchAll(/new ChainlinkOracle\(([^;]*)\)\s*;/g)];
+    const args = all.length === 1 ? all[0][1].split(",").map((a) => a.trim()) : [];
+    row("Deploy.s.sol: one new ChainlinkOracle(..) with two arguments", "1 construction, 2 arguments",
+      `${all.length} construction${all.length === 1 ? "" : "s"}${all.length === 1 ? `, ${args.length} argument${args.length === 1 ? "" : "s"}` : ""}`, all.length === 1 && args.length === 2);
+    row("Deploy.s.sol: new ChainlinkOracle(SEQUENCER_UPTIME_FEED, ..)", "SEQUENCER_UPTIME_FEED",
+      args[0] ?? "not found", args[0] === "SEQUENCER_UPTIME_FEED");
+    row("Deploy.s.sol: new ChainlinkOracle(.., true) - closed on weekends", "the literal true",
+      args[1] ?? "not found", args.length === 2 && args[1] === "true");
+  }
   // The launch posture: the deploy must not open deposits. The pause has to
   // be recorded BEFORE the admin handover starts (a pause set during setup
   // survives finishSetup, whoever sends it), finishSetup() has to come after
   // the handover, and nothing in the script may lift the pause.
-  const body = deploySol.replace(/\/\/.*$/gm, "");
   const iPause = body.indexOf("vault.setDepositsPaused(true);");
   const iHandover = body.indexOf("vault.transferAdmin(");
   const iFinish = body.indexOf("vault.finishSetup();");
@@ -306,8 +436,38 @@ for (const rt of cfg.routes) {
     pausedThenFinished ? "in that order" : "missing or out of order: this script could OPEN deposits", pausedThenFinished);
 }
 
+// ------------------------------------------- the numbers repeated from the contracts
+// This script works the push check and the freshness rules out by itself, with
+// its own copies of the contracts' constants. A copy that has drifted from
+// the contract makes every INFO row above describe some other vault.
+{
+  const constant = (src, name) => {
+    const m = src.replace(/\/\/.*$/gm, "").match(new RegExp(`constant\\s+${name}\\s*=\\s*([^;]+);`));
+    if (!m) return null;
+    const v = m[1].trim().replace(/_/g, "");
+    const unit = v.match(/^(\d+)\s*(hours|days|minutes|seconds)?$/);
+    return unit ? Number(unit[1]) * ({ hours: 3_600, days: 86_400, minutes: 60, seconds: 1 }[unit[2]] ?? 1) : v;
+  };
+  for (const [file, src, name, mine] of [
+    ["AerodromeSwapAdapter.sol", adapterSol, "TWAP_WINDOW", TWAP_WINDOW],
+    ["AerodromeSwapAdapter.sol", adapterSol, "TWAP_STEP", TWAP_STEP],
+    ["AerodromeSwapAdapter.sol", adapterSol, "MAX_TWAP_DRIFT", MAX_TWAP_DRIFT],
+    ["ChainlinkOracle.sol", oracleSol, "HEARTBEAT", HEARTBEAT],
+    ["ChainlinkOracle.sol", oracleSol, "FEED_GAS", FEED_GAS],
+    ["ChainlinkOracle.sol", oracleSol, "SEQUENCER_GRACE", SEQUENCER_GRACE],
+    ["ChainlinkOracle.sol", oracleSol, "WEEKEND_LENGTH", WEEKEND_LENGTH],
+  ]) {
+    const theirs = constant(src, name);
+    row(`${file} ${name}`, `${mine} (this script's copy)`, theirs ?? "not found", theirs === mine);
+  }
+  // And the rule itself, as the script repeats it above.
+  const rule = /closedOnWeekends\s*&&\s*\(block\.timestamp \+ 5 days\) % 7 days < WEEKEND_LENGTH/.test(oracleSol);
+  row("ChainlinkOracle.sol weekendClosed()", "closedOnWeekends && (block.timestamp + 5 days) % 7 days < WEEKEND_LENGTH", rule ? "as expected" : "changed: re-read this script's weekend rows", rule);
+}
+
 print();
-console.log(`\nhead block ${headNo}, ${new Date(now * 1000).toISOString()} (${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(now * 1000).getUTCDay()]} UTC), rpc ${new URL(RPC).host}`);
+console.log(`\nhead block ${headNo}, ${new Date(now * 1000).toISOString()} (${DAYS[new Date(now * 1000).getUTCDay()]} UTC), rpc ${new URL(RPC).host}`);
+console.log(`weekend rule: ${weekendClosed ? "CLOSED - no buy would run right now, whatever the feeds say" : "open"}`);
 console.log(`file says verifiedAt ${cfg.verifiedAt}`);
 console.log(mismatches === 0 ? "ALL OK (INFO rows are reported, not judged)" : `${mismatches} MISMATCH - do not deploy`);
 process.exit(mismatches === 0 ? 0 : 1);

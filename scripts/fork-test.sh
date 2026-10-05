@@ -39,4 +39,23 @@ esac
 # default fork alongside a pinned one panics foundry 1.8.3 inside op-revm.
 #
 # Run from the REPO ROOT, which is the one foundry project root.
-forge test --match-path 'contracts/test/Fork*.t.sol' -vv
+#
+# Two forge runs, and both always happen.
+#
+# 1. Fork.t.sol and ForkDeploy.t.sol fork the LATEST block, so nothing they
+#    read is cached: every storage slot is a request. Fork.t.sol's tests are
+#    heavy readers (two swaps across 90,000 ticks of the real pool, and six
+#    binary searches of each launch pool's observations where round 6 made
+#    two), and forge runs a file's tests side by side. Together they ask for
+#    more than a rate-limited endpoint gives: it answers HTTP 429 "over rate
+#    limit", forge gives up after its retries, and three tests fail on the
+#    transport, one of them as a bare `EvmError: Revert` in the middle of a
+#    swap. ONE THREAD fixes it: measured in round 6b on a key that was being
+#    throttled, 4 passed and 3 failed side by side, and 7 passed on one
+#    thread a minute later, in 55 s.
+# 2. The other three pin an old block. forge caches what they read, so they
+#    can have every core.
+rc=0
+forge test --match-path 'contracts/test/{Fork,ForkDeploy}.t.sol' --threads 1 -vv || rc=1
+forge test --match-path 'contracts/test/{ForkAdapters,ForkAdv,ForkHard}.t.sol' -vv || rc=1
+exit "$rc"

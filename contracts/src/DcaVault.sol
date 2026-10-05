@@ -64,6 +64,7 @@ contract DcaVault {
     error QueueExpired(uint64 deadline);
     error BadTokenDecimals(uint256 decimals);
     error SetupOpen();
+    error ZeroShares();
 
     // --------------------------------------------------------------- types
     struct Route {
@@ -120,7 +121,11 @@ contract DcaVault {
     /// Every stock the vault prices is 8 decimals (B20, verified on Base). The
     /// `minOut` math and the swap adapter's pool price both assume it.
     uint8 public constant STOCK_DECIMALS = 8;
-    /// Before a stranger may call executeDCA on a due plan.
+    /// Before a stranger may call executeDCA on a due plan. Counted from
+    /// the time the buy fell DUE, not from the time it first became possible:
+    /// a buy that was due while the oracle called the price stale (a
+    /// weekend, on the mainnet oracle) can be 12 hours overdue already in
+    /// the first second it can execute, and is then open to anyone at once.
     uint64 public constant grace = 12 hours;
     /// 1 USDC. A 1-wei installment would let one plan hold the TVL cap forever.
     uint256 public constant MIN_INSTALLMENT = 1e6;
@@ -187,7 +192,9 @@ contract DcaVault {
     ///         slippage bound, so an allowlisted keeper picking the block can
     ///         extract no more than the owner could. `grace` exists to stop
     ///         ANYONE holding that option from block zero, not to delay the
-    ///         one bot whose whole job is to be on time.
+    ///         one bot whose whole job is to be on time. It does that only
+    ///         for a buy that could have executed when it fell due: see the
+    ///         note on `grace`.
     mapping(address => bool) public keepers;
 
     uint256 private _lock = 1;
@@ -412,8 +419,18 @@ contract DcaVault {
         emit FeeSet(bps);
     }
 
+    /// @dev Not the vault, not its adapters and not its oracle. Nothing can
+    ///      be swept from any of the four, so fees claimed to one of them
+    ///      would stay there for good.
+    ///
+    ///      NOT A COMPLETE LIST, and it cannot be one: a pool, a stock
+    ///      token, or any other contract that cannot send USDC on is still
+    ///      accepted, and fees claimed to it are lost. That costs the fee
+    ///      recipient its fees and nobody else anything.
     function setFeeRecipient(address r) external onlyAdmin {
-        if (r == address(0)) revert BadParams();
+        if (r == address(0) || r == address(this)) revert BadParams();
+        if (r == address(adapter) || r == address(swapper)) revert BadParams();
+        if (r == address(oracle)) revert BadParams();
         feeRecipient = r;
         emit FeeRecipientSet(r);
     }
@@ -514,6 +531,14 @@ contract DcaVault {
         ) {
             revert BadParams();
         }
+        // No dust final period, AT CREATION. A deposit that does not divide
+        // leaves the remainder as a last, short installment, and the minimum
+        // has to hold for that one too: a 2-wei tail is a plan the cap barely
+        // counts, and a last buy of nothing. (After a lending loss the last
+        // period spends whatever the plan's shares are still worth, which
+        // can be under the minimum. This rule cannot see that.)
+        uint256 tail = deposit % installment;
+        if (tail != 0 && tail < MIN_INSTALLMENT) revert BadParams();
         // Outstanding principal, not cumulative deposits. Written so a cap
         // lowered below the current total cannot underflow.
         if (totalPrincipal > tvlCap || deposit > tvlCap - totalPrincipal) revert CapExceeded();
@@ -536,12 +561,16 @@ contract DcaVault {
         emit PlanCreated(id, msg.sender, routeId, deposit);
 
         _supply(id, deposit);
-        // Period 1 fires immediately — unless the feed is stale (no print for
-        // 24h, which is most of a weekend), in which case the plan is created
-        // already due and is bought at the next fresh print. Reverting instead
-        // would make the deposit button fail every weekend for no protective
-        // gain. For the first 24h after the last print the feed still reads
-        // fresh, and this buy runs against that print.
+        // Period 1 fires immediately — unless the oracle says the price is
+        // not fresh (no print for 24h, the sequencer just back, or, on the
+        // mainnet oracle, any time from Saturday 00:00 to Monday 01:00 UTC),
+        // in which case the plan is created already due and is bought once
+        // the price is fresh, by whoever may send it: owner, keeper, or
+        // anyone once it is 12 h overdue, which a Saturday deposit already
+        // is when the weekend ends. Reverting instead would make the
+        // deposit button fail every weekend for no protective gain. Outside
+        // the weekend a print still reads fresh for 24h, and this buy runs
+        // against it.
         if (oracle.isFresh(r.token)) _execute(id);
     }
 
@@ -672,9 +701,13 @@ contract DcaVault {
     ///      real headroom without handing a sandwich the old 5%.
     ///
     ///      A stale feed is a REVERT, weekday or weekend, and the plan waits
-    ///      for the next fresh print. Stale means more than 24h since the
-    ///      last print, so for the first day of a freeze a buy still executes
-    ///      against that print (docs/threat-model.md, *Stale feeds*).
+    ///      for the next fresh print. Stale is whatever the oracle's
+    ///      `isFresh` says it is: more than 24h since the last print, the
+    ///      sequencer down or just back, and on the mainnet oracle every
+    ///      weekend. On any other day a print is good for 24h, so for the
+    ///      first day of a freeze that is not a weekend (an exchange holiday)
+    ///      a buy still executes against it (docs/threat-model.md, *Stale
+    ///      feeds*).
     function _minOut(Route memory r, uint256 amountInUsdc) internal view returns (uint256) {
         if (!oracle.isFresh(r.token)) revert StaleOracle();
         (uint256 refPx,) = oracle.latestPrice(r.token);
@@ -684,7 +717,9 @@ contract DcaVault {
         // from the feed when the call starts. It reads the pool's SPOT price,
         // so it is NOT an independent check on the feed: a caller who moves
         // the pool inside the band in the same transaction passes it. It does
-        // not price the fill; the line below does, against the feed.
+        // not price the fill; the line below does, against the feed. What
+        // refuses that push is the swap adapter, which holds the spot to the
+        // pool's own recent average (AerodromeSwapAdapter._assertNotPushed).
         uint256 poolPx = swapper.poolPrice(r.pool, r.token);
         if (poolPx == 0) revert PoolDiverged(refPx, poolPx);
         uint256 diff = refPx > poolPx ? refPx - poolPx : poolPx - refPx;
@@ -698,6 +733,9 @@ contract DcaVault {
     function _supply(uint256 id, uint256 assets) internal {
         address(usdc).safeApprove(address(adapter), assets);
         uint256 shares = adapter.supply(assets);
+        // A supply that mints no shares took the USDC and gave the plan a
+        // claim on nothing.
+        if (shares == 0) revert ZeroShares();
         plans[id].yieldShares += shares;
         totalManagedShares += shares;
     }

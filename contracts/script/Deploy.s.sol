@@ -56,6 +56,10 @@ contract Deploy is Script {
     address constant METAC = 0xb2000000000000000000008bC8786B856E61707C;
     address constant METAC_POOL = 0xEAF57753BC382E0324a1D43F72E7027705a2273E;
     address constant METAC_FEED = 0x6526aE6797A76123638b863AeE4dD27Ba4E4b27D;
+    // Chainlink's "L2 Sequencer Uptime Status Feed" for Base. Immutable in the
+    // oracle: no price counts as fresh while the sequencer is down, or for an
+    // hour after it restarts.
+    address constant SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
 
     uint256 constant LAUNCH_TVL_CAP = 5_000e6;
 
@@ -68,7 +72,7 @@ contract Deploy is Script {
         // address below is predicted from THIS account's nonce.
         (, address deployer,) = vm.readCallers();
 
-        ChainlinkOracle oracle = new ChainlinkOracle();
+        ChainlinkOracle oracle = new ChainlinkOracle(SEQUENCER_UPTIME_FEED, true);
         // First listing of a token is instant; CHANGING it later is queued
         // behind the oracle's 48h delay. setFeed also checks decimals() == 8.
         oracle.setFeed(NVDAC, NVDAC_FEED);

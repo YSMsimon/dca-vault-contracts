@@ -72,7 +72,7 @@ contract ForkAdaptersTest is Test {
         vm.skip(keccak256(bytes(rpc)) == keccak256("off") || bytes(rpc).length == 0);
         vm.createSelectFork(rpc, FORK_BLOCK);
 
-        oracle = new ChainlinkOracle();
+        oracle = new ChainlinkOracle(address(0), false);
 
         // The stock leg is a mintable stand-in (see the note above), but it is
         // priced off the REAL NVDA feed, so the reference price and every

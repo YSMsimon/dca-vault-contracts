@@ -111,7 +111,7 @@ contract HalmosReaudit {
     /// R6: oracle — a listed token's feed cannot change before ADMIN_DELAY by
     ///     any two admin calls.
     function check_oracleFeedCannotChangeEarly(uint256 t) public {
-        ChainlinkOracle o = new ChainlinkOracle();
+        ChainlinkOracle o = new ChainlinkOracle(address(0), false);
         FakeFeed f1 = new FakeFeed();
         FakeFeed f2 = new FakeFeed();
         o.setFeed(address(stock), address(f1));

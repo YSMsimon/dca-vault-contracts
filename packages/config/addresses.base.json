@@ -8,7 +8,8 @@
     "USDC":        { "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "decimals": 6 },
     "MorphoBlue":  { "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb" },
     "AaveV3Pool":  { "address": "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5" },
-    "AaveV3aUSDC": { "address": "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB", "decimals": 6, "_note": "Aave's aUSDC. REBASES: balance is scaledBalanceOf * liquidityIndex, so the vault ledgers the scaled unit. Confirmed live by ForkAdapters.t.sol, which supplies and withdraws real USDC through the pool above." }
+    "AaveV3aUSDC": { "address": "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB", "decimals": 6, "_note": "Aave's aUSDC. REBASES: balance is scaledBalanceOf * liquidityIndex, so the vault ledgers the scaled unit. Confirmed live by ForkAdapters.t.sol, which supplies and withdraws real USDC through the pool above." },
+    "SequencerUptimeFeed": { "address": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433", "description": "L2 Sequencer Uptime Status Feed", "_note": "Chainlink's uptime feed for Base's sequencer: answer 0 is up, 1 is down, startedAt is when it last changed. ChainlinkOracle takes this address in its constructor and can never change it: no price counts as fresh while the feed answers down, or for an hour after it comes back. A feed the oracle cannot read is IGNORED, so this address being right is the whole check. Verified against Base mainnet on 2026-10-04 (description as above, answer 0); Fork.t.sol reads it through the oracle." }
   },
   "yieldVault": {
     "_choice": "Gauntlet USDC Prime — largest Base USDC vault, and verified to hold ZERO allocation to B20 stock-collateral markets. Steakhouse High Yield USDC v1.1 pays 5.30% but holds 3.2% in AAPLc/GOOGLc/METAc/NVDAc/SPCXc collateral markets: correlated with exactly the assets this protocol buys, so its extra yield is compensation for the risk we must not take.",

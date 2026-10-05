@@ -23,7 +23,7 @@ contract Adv3Test is Test {
         MockYieldAdapter y = new MockYieldAdapter(usdc);
         MockPriceOracle po = new MockPriceOracle();
         MockSwapAdapter sw = new MockSwapAdapter(usdc, s, po);
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         FakeFeed f = new FakeFeed();
         f.set(227e8, block.timestamp, true);
         po.setPrice(address(s), 227e8);

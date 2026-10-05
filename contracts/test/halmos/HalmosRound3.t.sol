@@ -111,7 +111,7 @@ contract HalmosRound3 {
 
     /// Oracle feed activation succeeds IFF eta <= now <= eta + 7d.
     function check_feedWindowExact(uint256 t) public {
-        ChainlinkOracle o = new ChainlinkOracle();
+        ChainlinkOracle o = new ChainlinkOracle(address(0), false);
         FakeFeed f1 = new FakeFeed();
         FakeFeed f2 = new FakeFeed();
         o.setFeed(address(stock), address(f1));
@@ -292,7 +292,7 @@ contract HalmosRound3 {
     function check_isFreshImpliesLatestPrice(uint256 a, uint256 b, uint256 c, uint256 d, uint256 e)
         public
     {
-        ChainlinkOracle o = new ChainlinkOracle();
+        ChainlinkOracle o = new ChainlinkOracle(address(0), false);
         WordsFeed f = new WordsFeed();
         o.setFeed(address(stock), address(f));
         f.set(a, b, c, d, e);

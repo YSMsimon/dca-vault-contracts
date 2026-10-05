@@ -284,7 +284,7 @@ contract Round3Test is Test {
         wide.setMode(1); // decimals() reverts
         FakeFeed f = new FakeFeed();
         f.set(100e8, block.timestamp, true);
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         cl.setFeed(address(wide), address(f));
         QuotePool pool = new QuotePool(address(usdc), address(wide), uint160(1 << 96));
         MockYieldAdapter y2 = new MockYieldAdapter(usdc);
@@ -382,7 +382,7 @@ contract Round3Test is Test {
         MockPriceOracle po = new MockPriceOracle();
         po.setPrice(address(s), 1e8);
         MockSwapAdapter sw = new MockSwapAdapter(usdc, s, po);
-        cl = new ChainlinkOracle();
+        cl = new ChainlinkOracle(address(0), false);
         cl.setFeed(address(s), address(rf));
         MockYieldAdapter y2 = new MockYieldAdapter(usdc);
         v = new DcaVault(IERC20(address(usdc)), y2, sw, cl, 1e15);
@@ -620,7 +620,7 @@ contract Round3Test is Test {
     /// so a fresh-but-gas-hungry feed made every deposit run out of gas. The
     /// read is capped: such a feed reads as not fresh, cheaply.
     function test_R4_AGasHungryFeedReadsNotFreshAndCheaply() public {
-        ChainlinkOracle cl = new ChainlinkOracle();
+        ChainlinkOracle cl = new ChainlinkOracle(address(0), false);
         GasHungryFeed hungry = new GasHungryFeed();
         address tok = address(new MockERC20("h", "h", 8));
         cl.setFeed(tok, address(hungry));

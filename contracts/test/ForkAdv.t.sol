@@ -37,7 +37,7 @@ contract ForkAdvTest is Test {
         vm.skip(keccak256(bytes(rpc)) == keccak256("off") || bytes(rpc).length == 0);
         vm.createSelectFork(rpc, FORK_BLOCK);
         _feedPrints();
-        oracle = new ChainlinkOracle();
+        oracle = new ChainlinkOracle(address(0), false);
         stock = new MockStock("Fork NVDAc", "NVDAc");
         oracle.setFeed(address(stock), FEED);
         MockPriceOracle po = new MockPriceOracle();
@@ -117,6 +117,9 @@ contract ForkAdvTest is Test {
                 uint256 n = 1 + (uint256(keccak256(abi.encode(seed, j))) % 6);
                 uint256 inst = (d[j] + n - 1) / n;
                 if (inst < 1e6) inst = 1e6;
+                // The last, short period is held to the minimum too: drop a
+                // tail the vault would refuse.
+                if (d[j] % inst != 0 && d[j] % inst < 1e6) d[j] -= d[j] % inst;
                 vm.prank(us[j]);
                 ids[j] = vs[k].createPlan(1, d[j], inst, 1 days);
             }

@@ -21,9 +21,18 @@ interface IAggregatorV3 {
 /// @dev    All B20 feeds are 8 decimals, update on a 0.5% deviation or a 24h
 ///         heartbeat, and are **24/5 by design** — deliberately frozen from
 ///         Friday close to Monday open. `isFresh` stays TRUE for HEARTBEAT
-///         (24h) after the last print, so for the first day of a freeze the
-///         vault can still buy against that print. After that it is false,
-///         the vault refuses to buy (`StaleOracle`), and the plan waits.
+///         (24h) after the last print, so for the first day of ANY freeze the
+///         heartbeat alone would let the vault buy against that print. After
+///         that it is false, the vault refuses to buy (`StaleOracle`), and
+///         the plan waits.
+///
+///         THE WEEKEND. The freeze that comes every week is not left to the
+///         heartbeat. When the oracle is deployed with `closedOnWeekends`,
+///         `isFresh` is false from Saturday 00:00 UTC to Monday 01:00 UTC
+///         whatever the feed says (`weekendClosed`): the pools trade through
+///         the weekend and the feed does not, so Friday's print is not a
+///         price to buy against on Saturday. A freeze on any other day (an
+///         exchange holiday) is still covered by the heartbeat only.
 ///
 ///         ADMIN POWERS, stated plainly. The feed a token prices off is what
 ///         bounds every fill, so swapping it is the same power as swapping the
@@ -40,8 +49,28 @@ interface IAggregatorV3 {
 ///             change queued — first listings go through `setFeed`.
 ///         The admin is handed over in two steps (`transferAdmin` then
 ///         `acceptAdmin`) so a typo cannot brick it.
+///
+///         THE SEQUENCER. Base is an L2: while its sequencer is down no feed
+///         can print, and when it comes back the last print still reads
+///         fresh until the next one lands. So `isFresh` also asks Chainlink's
+///         sequencer uptime feed, and is false while the sequencer is down
+///         and for SEQUENCER_GRACE after it restarts (`sequencerUp`).
 contract ChainlinkOracle is IPriceOracle {
     uint256 public constant HEARTBEAT = 86_400;
+    /// After the sequencer restarts, how long before a price counts as fresh
+    /// again: time for the feeds to print and for the pools to be arbitraged
+    /// back to them.
+    uint256 public constant SEQUENCER_GRACE = 1 hours;
+    /// How long the weekend rule keeps `isFresh` false, counted from
+    /// Saturday 00:00 UTC: until Monday 01:00 UTC. Chainlink's schedule for
+    /// the 24/5 equity feeds has them shut from about 20:00 on Friday to
+    /// 20:00 on Sunday, New York time, which is Saturday 00:00 to Monday
+    /// 00:00 UTC in summer and an hour later in winter. One fixed window in
+    /// UTC covers both: it shuts an hour early on winter Fridays and opens
+    /// an hour late on summer Mondays. In winter it opens in the same second
+    /// the feed does, and only the heartbeat holds a buy back until the
+    /// week's first print.
+    uint256 public constant WEEKEND_LENGTH = 49 hours;
     uint64 public constant ADMIN_DELAY = 48 hours;
     uint64 public constant ACTIVATION_WINDOW = 7 days;
     uint8 public constant FEED_DECIMALS = 8;
@@ -60,6 +89,14 @@ contract ChainlinkOracle is IPriceOracle {
         address feed;
         uint64 eta;
     }
+
+    /// Chainlink's L2 sequencer uptime feed for this chain. Zero switches the
+    /// check off, which is for local and test chains: they have no such feed.
+    address public immutable sequencerUptimeFeed;
+    /// Whether the weekend rule applies (`weekendClosed`). True on a chain
+    /// whose feeds are the 24/5 equity feeds; false for local and test
+    /// chains, whose stand-in feeds print whenever a test tells them to.
+    bool public immutable closedOnWeekends;
 
     address public admin;
     address public pendingAdmin;
@@ -88,7 +125,9 @@ contract ChainlinkOracle is IPriceOracle {
         _;
     }
 
-    constructor() {
+    constructor(address _sequencerUptimeFeed, bool _closedOnWeekends) {
+        sequencerUptimeFeed = _sequencerUptimeFeed;
+        closedOnWeekends = _closedOnWeekends;
         admin = msg.sender;
         emit AdminTransferred(address(0), msg.sender);
     }
@@ -168,13 +207,20 @@ contract ChainlinkOracle is IPriceOracle {
     }
 
     /// @dev True for HEARTBEAT (24h) after the feed's last print and false
-    ///      after that. So on a weekend it is still true for the first 24h
-    ///      after Friday's close, and false from then until Monday's first
-    ///      print. False for ANY answer `latestPrice` would reject: the two
-    ///      share `_read`, so `isFresh` true means `latestPrice` answers.
+    ///      after that. False for ANY answer `latestPrice` would reject: the
+    ///      two share `_read`, so `isFresh` true means `latestPrice` answers.
     ///      They used to decode differently, and a feed with an out-of-range
     ///      round id read as fresh here and then reverted there, inside
     ///      `createPlan`'s first buy.
+    ///
+    ///      Also false while the L2 sequencer is down, and for
+    ///      SEQUENCER_GRACE after it comes back (`sequencerUp`).
+    ///
+    ///      Also false through the weekend when `closedOnWeekends` is set
+    ///      (`weekendClosed`). Without that rule the heartbeat alone would
+    ///      keep Friday's last print fresh for 24 more hours, into a
+    ///      Saturday on which the feed is not printing and the pools are
+    ///      still trading.
     ///
     ///      NEVER REVERTS: a feed that reverts (deprecated, paused,
     ///      access-controlled), answers garbage, or returns a megabyte reads as
@@ -184,7 +230,63 @@ contract ChainlinkOracle is IPriceOracle {
         address f = feedOf[token];
         if (f == address(0)) return false;
         (bool ok,, uint256 ts) = _read(f);
-        return ok && block.timestamp - ts <= HEARTBEAT;
+        return ok && block.timestamp - ts <= HEARTBEAT && !weekendClosed() && sequencerUp();
+    }
+
+    /// @notice True from Saturday 00:00 UTC to Monday 01:00 UTC when the
+    ///         weekend rule is on. While it is true, `isFresh` is false for
+    ///         every token.
+    /// @dev    A date rule, not a reading: nothing an attacker or the admin
+    ///         does can move it. 1970-01-01 was a Thursday, so the Saturday
+    ///         of every week starts two days into each seven; adding five
+    ///         days puts that at zero.
+    ///
+    ///         WHAT IT IS NOT. It knows nothing about exchange holidays, and
+    ///         it cannot be changed: if the feeds one day print through the
+    ///         weekend, this oracle still will not buy on one.
+    function weekendClosed() public view returns (bool) {
+        return closedOnWeekends && (block.timestamp + 5 days) % 7 days < WEEKEND_LENGTH;
+    }
+
+    /// @notice What `isFresh` takes the sequencer's state to be. Public so
+    ///         that a monitor can see it: when this is true while the uptime
+    ///         feed itself cannot be read, the check has failed open (below).
+    /// @dev True when the sequencer uptime feed says the sequencer is up and
+    ///      has been for at least SEQUENCER_GRACE. The feed's `answer` is 0
+    ///      for up and 1 for down, and anything but 0 is taken as down;
+    ///      `startedAt` is when it last changed. A `startedAt` in the future
+    ///      counts as "just restarted", so it is false, not an underflow.
+    ///
+    ///      FAILS OPEN, ON PURPOSE. If the uptime feed cannot be read at all
+    ///      (it reverts, has no code, answers short, or needs more than
+    ///      FEED_GAS) this returns TRUE and the price feed's own heartbeat is
+    ///      the only freshness check left. The address is immutable: a feed
+    ///      Chainlink deprecates must not be able to halt every buy for good.
+    ///      The cost is that a dead uptime feed gives no protection after an
+    ///      outage, and nothing on chain says it has died.
+    ///
+    ///      Read like `_read` reads a price feed, so it never reverts either:
+    ///      bounded gas, and at most ROUND_DATA_SIZE bytes copied.
+    function sequencerUp() public view returns (bool) {
+        address f = sequencerUptimeFeed;
+        if (f == address(0)) return true;
+        bytes4 sel = IAggregatorV3.latestRoundData.selector;
+        bool ok;
+        uint256 answer;
+        uint256 startedAt;
+        assembly ("memory-safe") {
+            let p := mload(0x40)
+            mstore(p, sel)
+            ok := staticcall(FEED_GAS, f, p, 0x04, p, ROUND_DATA_SIZE)
+            ok := and(ok, iszero(lt(returndatasize(), ROUND_DATA_SIZE)))
+            if ok {
+                answer := mload(add(p, 0x20))
+                startedAt := mload(add(p, 0x40))
+            }
+        }
+        if (!ok) return true;
+        if (answer != 0 || startedAt > block.timestamp) return false;
+        return block.timestamp - startedAt >= SEQUENCER_GRACE;
     }
 
     /// @dev ONE reader for both views. Low-level and in assembly so that at
@@ -195,7 +297,7 @@ contract ChainlinkOracle is IPriceOracle {
     ///        roundId, answeredInRound  fit in uint80
     ///        answer                    in (0, MAX_PRICE]
     ///        updatedAt                 nonzero and not in the future
-    ///      `startedAt` is not read.
+    ///      `startedAt` is not read: for a price it says nothing.
     function _read(address f) internal view returns (bool ok, uint256 price, uint256 ts) {
         bytes4 sel = IAggregatorV3.latestRoundData.selector;
         uint256 roundId;

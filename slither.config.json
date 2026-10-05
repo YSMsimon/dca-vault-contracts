@@ -3,5 +3,5 @@
   "exclude_dependencies": true,
   "exclude_informational": false,
   "exclude_low": false,
-  "_accepted": "See docs/threat-model.md, 'Accepted findings'. `reentrancy-no-eth` in _execute/_draw/createPlan/exitPlan: every external entry point carries nonReentrant, and the only cross-function reader of `plans` is the view planYield. `reentrancy-balance` in AerodromeSwapAdapter.swapExactIn is the measured-output fix (C10): only the vault can call it, the vault is nonReentrant, and the balance is only used as a before/after delta. `unused-return` is argued field by field. `timestamp` is inherent to a scheduler and is argued in the threat model rather than suppressed."
+  "_accepted": "See docs/threat-model.md, 'Accepted findings'. `reentrancy-no-eth` in _execute/_draw/createPlan/exitPlan: every external entry point carries nonReentrant, and the only cross-function reader of `plans` is the view planYield. `reentrancy-balance` in AerodromeSwapAdapter.swapExactIn is the measured-output fix (C10): only the vault can call it, the vault is nonReentrant, and the balance is only used as a before/after delta. `unused-return` is argued field by field. `timestamp` is inherent to a scheduler and is argued in the threat model rather than suppressed. `weak-prng` on ChainlinkOracle.weekendClosed is a calendar rule (the second's place in the week), not randomness."
 }

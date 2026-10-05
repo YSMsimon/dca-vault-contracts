@@ -94,8 +94,12 @@ contract HalmosLedger {
     function check_ledgerConservation(uint256 d1, uint256 d2, uint256 px) public {
         vm.assume(d1 >= 2e6 && d1 <= 2_000e6 && d2 >= 2e6 && d2 <= 2_000e6);
         vm.assume(px >= 1e18 && px <= 1.2e18);
-        (bool okA, uint256 a) = _create(alice, d1, d1 / 2);
-        (bool okB, uint256 b) = _create(bob, d2, d2 / 2);
+        // Half, rounded UP: an odd deposit's second period is one unit short.
+        // Rounded down it left a third period of one unit, which the vault
+        // refuses since round 6 (R5-5), and the assume below then dropped
+        // every odd deposit.
+        (bool okA, uint256 a) = _create(alice, d1, (d1 + 1) / 2);
+        (bool okB, uint256 b) = _create(bob, d2, (d2 + 1) / 2);
         vm.assume(okA && okB);
         yield_.accrueTo(px);
         vm.prank(alice);

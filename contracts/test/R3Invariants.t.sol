@@ -154,7 +154,7 @@ contract R3Handler is Test {
             feeds[i] = new FakeFeed();
             feeds[i].set(px[i], block.timestamp, true);
         }
-        cl = new ChainlinkOracle();
+        cl = new ChainlinkOracle(address(0), false);
         cl.setFeed(address(tok[0]), address(feeds[0]));
         cl.setFeed(address(tok[1]), address(feeds[2]));
         mFeed[address(tok[0])] = address(feeds[0]);
