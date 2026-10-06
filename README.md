@@ -131,7 +131,8 @@ stopped on weekends, and the documents were corrected. Both are still
 bounded, not fixed. Round 6b was then reviewed twice more before it was
 published: that review measured what passing the price check costs, found
 one new Low that is still open (R6b-1), and corrected these documents again.
-One of the 19 Halmos checks did not finish on this code and has no result. `docs/hardening-plan.md` lists every finding, including
+One of the 19 Halmos checks has not finished since round 4 and has no
+result on this code (stopped after 6 hours). `docs/hardening-plan.md` lists every finding, including
 the ones that were accepted rather than fixed.
 
 None of that is an audit. If you are reading this to decide whether to trust

@@ -48,8 +48,12 @@ contract WordsFeed {
 ///         round-3 fixes (F2, F3, F4).
 /// @dev    Run: HALMOS_CONTRACT=HalmosRound3 bash scripts/halmos.sh
 ///         `check_boundsTwoCallsCannotLoosenEarly`
-///         explores ~45k paths and takes about half an hour; filter it out with
-///         `--function` for a quick pass. setUp now calls `finishSetup`: the
+///         explored ~45k paths and took about half an hour when it was
+///         written, in round 3. IT HAS NOT FINISHED SINCE: it was stopped
+///         without a result in round 4, and in round 6b after 2.5 hours and
+///         again after 6 hours alone on an idle machine. Filter it out with
+///         `--function` to run the rest; it needs splitting into smaller
+///         checks before it says anything about the current code. setUp now calls `finishSetup`: the
 ///         setup window is closed by the admin, not by the first plan (F4).
 contract HalmosRound3 {
     Vm constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));

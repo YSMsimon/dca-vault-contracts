@@ -670,14 +670,25 @@ recipient and nobody else. Test: `test_R6b_TheFeeRecipientCannotBeTheOracle`.
 - **Echidna:** 11 properties hold over 200,302 calls. Its own Slither
   pre-pass failed to start, so this run had no Slither-derived seeds.
 - **Halmos:** 18 of the 19 checks pass (`HalmosLedger` 3, `HalmosReaudit` 5,
-  `HalmosRound3` 10 of 11). **One did not finish:**
+  `HalmosRound3` 10 of 11). **One has no result:**
   `HalmosRound3.check_boundsTwoCallsCannotLoosenEarly` was stopped after 2.5
-  hours on a busy machine with no result. It took about half an hour on
-  round 5's code. The functions it is about (`setBounds`, `queueBounds`,
-  `activateBounds`) were not changed in round 6 or 6b; what changed is
-  `createPlan`, which its two arbitrary calls can reach and whose new
-  remainder is hard for the solver. That is an explanation, not a result:
-  this check is NOT known to hold on this code.
+  hours on a busy machine, and again after 6 hours alone on an idle one.
+  This is not new with round 6. The same check was stopped without a result
+  in round 4, and the count of 18 used since then leaves it out; the comment
+  in the harness (about 45,000 paths, about half an hour) is from round 3,
+  when it was written. A copy of this code with round 6's tail rule taken
+  out did not finish in 90 minutes either, so the new remainder in
+  `createPlan` is not shown to be the cause. None of that is a result: the
+  property (two arbitrary admin calls inside 48 hours cannot loosen either
+  bound) is NOT known to hold on this code by symbolic execution, and has
+  not been since round 3. What does cover the bounds' timelock on this code:
+  `HalmosRound3.check_boundsQueueAndWindow` and
+  `check_instantChangeDropsQueuedLoosening`, which pass;
+  `Round2.test_D2_LooseningTheBoundsIsQueuedTighteningIsNot`,
+  `Round3.test_F2_ATighteningDropsAPendingLoosening` and
+  `Round3.testFuzz_F2_NoLooseningSurvivesAnInstantChange`; and Echidna's
+  `echidna_instant_bounds_drop_queue`. The check needs to be split into
+  smaller ones. More time did not finish it.
 - **Order of events.** Comments in the three contracts were corrected after
   the Halmos, Echidna and Mythril runs (the re-review's wording fixes; no
   code changed). The offline suite, the fork suites and the rehearsal were
