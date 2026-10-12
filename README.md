@@ -35,6 +35,7 @@ web app, the keeper and the indexer are not published here.
 | `docs/threat-model.md` | What each key can and cannot do, and the risks accepted rather than solved |
 | `docs/hardening-plan.md` | Every finding from six internal review rounds and a re-review of the sixth, and what was done about it |
 | `packages/config/addresses.base.json` | The Base mainnet addresses the deploy uses, with how each was verified |
+| `agents/coinbase-wallet-mcp/dca-vault.md` | A plugin for Coinbase's Wallet MCP: an agent reads the Base Sepolia demo vault and starts or stops a plan, and the person approves each transaction in Coinbase Wallet |
 
 ## Who can do what
 
